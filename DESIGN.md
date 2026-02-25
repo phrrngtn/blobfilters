@@ -126,7 +126,42 @@ CREATE TABLE column_domains (
     confidence      REAL,           -- combined/weighted score
     PRIMARY KEY (column_id, domain_id)
 );
+
+-- Known column header names / aliases for each domain
+CREATE TABLE domain_aliases (
+    domain_id       INTEGER REFERENCES domains,
+    alias           TEXT NOT NULL,  -- 'State', 'ST', 'state_code', 'ship_state'
+    alias_type      TEXT,           -- 'exact', 'abbreviation', 'translation'
+    PRIMARY KEY (domain_id, alias)
+);
 ```
+
+### Domain Alias Bootstrapping
+
+The `domain_aliases` table can be populated automatically from the catalog
+itself. When crawling databases, every `column_name` that has been attributed
+to a domain (via `column_domains` with high containment) is an observed alias
+for that domain. After crawling 50 databases, the `us_states` domain might
+have accumulated aliases like "State", "STATE", "st", "state_code",
+"customer_state", "ship_state", "billing_state" — all discovered from real
+column names pointing to the same domain.
+
+```sql
+-- Bootstrap aliases from observed column names
+INSERT OR IGNORE INTO domain_aliases (domain_id, alias, alias_type)
+SELECT cd.domain_id, c.column_name, 'exact'
+FROM column_domains cd
+JOIN columns c USING (column_id)
+WHERE cd.containment > 0.8
+  AND c.column_name IS NOT NULL;
+```
+
+This turns the alias table into a crowdsourced thesaurus of column naming
+conventions, grounded in actual data rather than manual curation. When
+classifying a wild table, unmatched bounding box text (potential column
+headers) can be looked up against this table. If a header matches multiple
+domain aliases, the value-based containment score from the body of the
+column breaks the tie.
 
 ### Source Mapping
 
