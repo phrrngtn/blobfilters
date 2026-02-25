@@ -348,19 +348,103 @@ This approach has several desirable properties:
   probed per page, processing hundreds of pages per second. The bottleneck is
   document parsing (blobboxes), not classification.
 
+## Remote Schema Discovery via Histogram Triage
+
+The statistics histograms maintained by database query planners (e.g.,
+SQL Server's `sys.dm_db_stats_histogram`) are cheap to access — they are
+metadata, not data — and contain enough information to triage columns into
+candidate keys, candidate FKs, and uninteresting columns before touching
+any actual row data.
+
+### Histogram Shape as Column Classifier
+
+Each histogram step has: `range_high_key`, `range_rows`, `equal_rows`,
+`distinct_range_rows`, `average_range_rows`. The shape tells you what kind
+of column you're looking at:
+
+| Histogram shape                    | Interpretation       | Action                              |
+|------------------------------------|----------------------|-------------------------------------|
+| All unique, no nulls, equal_rows=1 | Candidate key        | Build fingerprint, add to catalog   |
+| Low cardinality, equal_rows > 1    | FK or categorical    | Match against known domains         |
+| High null fraction                 | Optional FK / sparse | Lower confidence, still probe       |
+| Very low cardinality (2–10)        | Boolean / enum       | Probably not worth fingerprinting   |
+
+Candidate key columns are domain *sources* — their distinct values define a
+domain. Non-key columns with repeating values that match a known domain are
+likely FKs referencing that domain.
+
+### Remote Access via sqlite-embedded-odbc
+
+The [sqlite-embedded-odbc](https://github.com/phrrngtn/sqlite-embedded-odbc)
+extension allows execution of pass-through queries against remote databases
+via ODBC connection strings, with results materialized as SQLite tables. This
+contains all connection complexity behind the database layer — the local
+client issues only SQLite queries.
+
+```sql
+-- Pull histograms from a remote SQL Server
+CREATE TEMP TABLE remote_histograms AS
+SELECT * FROM odbc_exec(
+    'Driver={ODBC Driver 18 for SQL Server};Server=prod-01;...',
+    'SELECT c.name AS column_name, h.*
+     FROM sys.columns c
+     CROSS APPLY sys.dm_db_stats_histogram(c.object_id, c.column_id) h
+     WHERE c.object_id = OBJECT_ID(''dbo.customers'')'
+);
+```
+
+### Three-Layer FK Discovery
+
+The histogram triage, roaring probing, and remote validation form a
+progressive refinement pipeline. Each layer narrows the work for the next,
+avoiding expensive N² remote queries across all column pairs.
+
+**Layer 1 — Histogram triage** (cheap, remote metadata only): Query
+`sys.dm_db_stats_histogram` for all columns of interest. Classify each as
+candidate key, candidate FK, or uninteresting based on histogram shape.
+
+**Layer 2 — Roaring probe** (cheap, local): For candidate key columns, pull
+distinct values (or a sample) and build domain fingerprints. For candidate FK
+columns, probe a sample of values against the domain catalog. A 98%
+containment score strongly suggests a real FK relationship.
+
+**Layer 3 — Remote set validation** (expensive, but targeted): For the
+candidate pairs that survived layers 1–2, push a targeted validation query
+to the remote server to confirm or enumerate violations:
+
+```sql
+-- Confirm FK: are all values in the FK column present in the PK column?
+CREATE TEMP TABLE fk_violations AS
+SELECT * FROM odbc_exec(
+    @conn,
+    'SELECT DISTINCT o.customer_id
+     FROM orders o
+     WHERE o.customer_id NOT IN (
+         SELECT customer_id FROM customers
+     )'
+);
+-- Empty result = confirmed FK relationship
+-- Non-empty = violations (count indicates data quality)
+```
+
+This can be done in bulk across all surviving candidate pairs:
+
+```sql
+-- For each (candidate_fk, candidate_pk) pair, push a single
+-- set-difference query. Zero violations = confirmed FK.
+-- The roaring pre-filter ensures we only run this for high-
+-- probability pairs, not all N² column combinations.
+```
+
+The layering means that for a database with 500 columns, you might:
+- Histogram triage: 500 columns → 50 candidate keys, 200 candidate FKs
+- Roaring probe: 200 × 50 = 10,000 pairs → 30 high-scoring pairs
+- Remote validation: 30 targeted queries → 25 confirmed FK relationships
+
 ## Complementary Signals (Future)
 
 Roaring bitmap probing is the fast, exact foundation. Additional signals can
 be layered on top for cases where exact matching is insufficient:
-
-### Histogram Probing
-
-For large database columns where full symbol extraction is impractical,
-SQL Server's `sys.dm_db_stats_histogram` provides a 200-step summary.
-A probe can binary-search histogram boundaries for exact hits (symbol equals
-a `range_high_key`) and in-range hits (symbol falls within a bucket with
-`distinct_range_rows > 0`). Accuracy degrades with domain size — at 200 steps
-over 100K values, 99.8% of the domain is not directly visible.
 
 ### Semantic Embedding
 
