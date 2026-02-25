@@ -189,6 +189,130 @@ WHERE t1.table_id != t2.table_id
   AND cd2.containment > 0.7;
 ```
 
+## Page Classification Pipeline
+
+Documents (PDF, Excel, Word) are tokenized into bounding boxes by the
+companion [blobboxes](../blobboxes) library, which provides a SQLite virtual
+table `bboxes` with columns `(page_id, x, y, w, h, text, style_id, ...)`.
+Each text fragment is a token. For Excel this is one cell per bbox; for PDF
+it is a run of characters with consistent style and position.
+
+The classification pipeline is pure SQL using both extensions (`bboxes` for
+extraction, `roaring` for domain probing). No ML, no training data.
+
+### Per-Page Domain Detection
+
+```sql
+WITH page_tokens AS (
+    SELECT page_id,
+           json_group_array(text) AS symbols_json
+    FROM bboxes
+    WHERE file_path = 'report.pdf'
+      AND text != ''
+    GROUP BY page_id
+),
+page_probes AS (
+    SELECT page_id,
+           roaring_build_json(symbols_json) AS fp
+    FROM page_tokens
+),
+page_matches AS (
+    SELECT p.page_id,
+           d.domain_name,
+           d.symbol_count                                  AS domain_size,
+           roaring_cardinality(p.fp)                       AS probe_size,
+           roaring_intersection_card(p.fp, d.fingerprint)  AS est_hits,
+           roaring_containment(p.fp, d.fingerprint)        AS containment,
+           roaring_jaccard(p.fp, d.fingerprint)            AS jaccard
+    FROM page_probes p, domain_fingerprints d
+)
+SELECT page_id,
+       domain_name,
+       domain_size,
+       probe_size,
+       est_hits,
+       containment,
+       jaccard
+FROM page_matches
+WHERE est_hits > 0
+ORDER BY page_id, containment DESC;
+```
+
+Each page gets its own probe bitmap (built once in `page_probes`), then
+cross-joined against all domain fingerprints. The `WHERE est_hits > 0`
+filters to domains with at least one symbol present on that page.
+
+### Page Run Detection (Gaps-and-Islands)
+
+Pages with the same domain signature are likely part of the same logical
+table spanning multiple pages. The classic gaps-and-islands technique groups
+consecutive pages that share a signature:
+
+```sql
+WITH page_tokens AS (
+    SELECT page_id,
+           json_group_array(text) AS symbols_json
+    FROM bboxes
+    WHERE file_path = 'report.pdf'
+      AND text != ''
+    GROUP BY page_id
+),
+page_probes AS (
+    SELECT page_id,
+           roaring_build_json(symbols_json) AS fp
+    FROM page_tokens
+),
+page_matches AS (
+    SELECT p.page_id,
+           d.domain_name,
+           roaring_containment(p.fp, d.fingerprint) AS containment
+    FROM page_probes p, domain_fingerprints d
+),
+page_signatures AS (
+    SELECT page_id,
+           GROUP_CONCAT(domain_name, '|') AS signature
+    FROM page_matches
+    WHERE containment > 0.05
+    ORDER BY page_id, domain_name
+),
+runs AS (
+    SELECT page_id,
+           signature,
+           page_id - ROW_NUMBER() OVER (PARTITION BY signature ORDER BY page_id) AS run_id
+    FROM page_signatures
+)
+SELECT MIN(page_id) AS start_page,
+       MAX(page_id) AS end_page,
+       COUNT(*)     AS page_count,
+       signature
+FROM runs
+GROUP BY signature, run_id
+ORDER BY start_page;
+```
+
+A 200-page PDF where pages 1–2 are title/TOC, pages 3–45 are a customer
+listing, pages 46–120 are order details, and pages 121–200 are an appendix
+would produce exactly those 4 runs — each identified by its domain signature.
+
+### Properties
+
+This approach has several desirable properties:
+
+- **No training data** — domains are defined by their actual values. Add a
+  domain by inserting its symbols. No retraining, no embeddings to regenerate.
+- **Interpretable** — output is "8 of your 22 values are literally in this
+  domain." Not a probability from a black box.
+- **Compositional** — the whole pipeline is CTEs. Wrap it, filter it, join it
+  with other queries. Run detection is just a `GROUP BY` on top of
+  classification. Join path inference is another query on top of that.
+- **Incremental** — scan a new database, `INSERT INTO domains` its column
+  fingerprints, and every future probe benefits immediately.
+- **Portable** — the entire classifier is a SQLite file (the domain catalog)
+  plus two loadable extensions. No Python runtime, no model weights, no GPU.
+- **Fast** — microsecond bitmap intersections mean thousands of domains can be
+  probed per page, processing hundreds of pages per second. The bottleneck is
+  document parsing (blobboxes), not classification.
+
 ## Complementary Signals (Future)
 
 Roaring bitmap probing is the fast, exact foundation. Additional signals can
