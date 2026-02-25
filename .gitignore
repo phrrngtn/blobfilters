@@ -1,0 +1,10 @@
+build/
+*.o
+*.so
+*.dylib
+*.a
+.DS_Store
+__pycache__/
+*.egg-info/
+dist/
+.claude/

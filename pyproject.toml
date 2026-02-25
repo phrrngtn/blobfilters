@@ -1,0 +1,13 @@
+[build-system]
+requires = ["scikit-build-core>=0.5", "nanobind>=2.0"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "blobfilters"
+version = "0.1.0"
+description = "Roaring bitmap fingerprint library for column matching"
+requires-python = ">=3.8"
+
+[tool.scikit-build]
+cmake.args = ["-DBUILD_PYTHON_BINDINGS=ON"]
+wheel.packages = ["python/blobfilters"]
