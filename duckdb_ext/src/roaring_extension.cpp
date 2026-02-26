@@ -319,6 +319,31 @@ static void FromBase64Func(DataChunk &args, ExpressionState &, Vector &result) {
 }
 
 //===--------------------------------------------------------------------===//
+// New: roaring_containment_json — builds probe from JSON, compares to ref BLOB
+//===--------------------------------------------------------------------===//
+
+static void ContainmentJsonFunc(DataChunk &args, ExpressionState &, Vector &result) {
+    BinaryExecutor::Execute<string_t, string_t, double>(
+        args.data[0], args.data[1], result, args.size(),
+        [](string_t json_input, string_t ref_blob) {
+            rfp_bitmap *probe = rfp_create();
+            if (rfp_add_json_array(probe, json_input.GetData(), json_input.GetSize()) != 0) {
+                rfp_free(probe);
+                return 0.0;
+            }
+            rfp_bitmap *ref = rfp_deserialize(ref_blob.GetData(), ref_blob.GetSize());
+            if (!ref) {
+                rfp_free(probe);
+                return 0.0;
+            }
+            double r = rfp_containment(probe, ref);
+            rfp_free(probe);
+            rfp_free(ref);
+            return r;
+        });
+}
+
+//===--------------------------------------------------------------------===//
 // Extension Loading
 //===--------------------------------------------------------------------===//
 
@@ -342,6 +367,9 @@ static void LoadInternal(ExtensionLoader &loader) {
                                            LogicalType::VARCHAR, ToBase64Func));
     loader.RegisterFunction(ScalarFunction("roaring_from_base64", {LogicalType::VARCHAR},
                                            LogicalType::BLOB, FromBase64Func));
+    loader.RegisterFunction(ScalarFunction("roaring_containment_json",
+                                           {LogicalType::VARCHAR, LogicalType::BLOB},
+                                           LogicalType::DOUBLE, ContainmentJsonFunc));
 }
 
 void RoaringExtension::Load(ExtensionLoader &loader) {

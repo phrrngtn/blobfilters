@@ -373,13 +373,17 @@ Candidate key columns are domain *sources* — their distinct values define a
 domain. Non-key columns with repeating values that match a known domain are
 likely FKs referencing that domain.
 
-### Remote Access via sqlite-embedded-odbc
+### Remote Access
+
+Two complementary approaches for querying remote databases from the local
+catalog. Both contain connection complexity behind the database layer — the
+local client issues only SQL queries.
+
+#### sqlite-embedded-odbc (SQLite)
 
 The [sqlite-embedded-odbc](https://github.com/phrrngtn/sqlite-embedded-odbc)
 extension allows execution of pass-through queries against remote databases
-via ODBC connection strings, with results materialized as SQLite tables. This
-contains all connection complexity behind the database layer — the local
-client issues only SQLite queries.
+via ODBC connection strings, with results materialized as SQLite tables.
 
 ```sql
 -- Pull histograms from a remote SQL Server
@@ -392,6 +396,49 @@ SELECT * FROM odbc_exec(
      WHERE c.object_id = OBJECT_ID(''dbo.customers'')'
 );
 ```
+
+#### DuckDB ODBC Scanner
+
+DuckDB has a native `odbc_scan` extension that provides an equivalent
+capability. Connection state is managed via DuckDB variables, and the ODBC
+scanner integrates with DuckDB's analytical engine (vectorized execution,
+automatic parallelism).
+
+```sql
+-- Install and load the ODBC scanner
+INSTALL odbc;
+LOAD odbc;
+
+-- Store connection string in a variable
+SET VARIABLE conn = 'Driver={ODBC Driver 18 for SQL Server};Server=prod-01;...';
+
+-- Pull histograms from a remote SQL Server
+CREATE TEMP TABLE remote_histograms AS
+SELECT * FROM odbc_query(getvariable('conn'),
+    'SELECT c.name AS column_name, h.*
+     FROM sys.columns c
+     CROSS APPLY sys.dm_db_stats_histogram(c.object_id, c.column_id) h
+     WHERE c.object_id = OBJECT_ID(''dbo.customers'')'
+);
+
+-- Or scan a full remote table directly
+CREATE TEMP TABLE remote_customers AS
+SELECT * FROM odbc_scan(getvariable('conn'), 'dbo', 'customers');
+```
+
+#### Comparison
+
+| Aspect           | sqlite-embedded-odbc             | DuckDB odbc_scan              |
+|------------------|----------------------------------|-------------------------------|
+| Connection model | Per-query connection string      | Variable-held connection      |
+| Query pattern    | `odbc_exec(conn, sql)`           | `odbc_query(conn, sql)`       |
+| Table scan       | Query-based only                 | `odbc_scan(conn, schema, tbl)`|
+| Aggregation      | SQLite scalar/aggregate          | DuckDB vectorized engine      |
+| Strength         | Lightweight, embeddable, portable| Fast analytics, columnar ops  |
+
+Both approaches feed into the same three-layer FK discovery pipeline. The
+choice depends on context: SQLite for embedded/portable catalogs, DuckDB for
+analytical workloads over large remote datasets.
 
 ### Three-Layer FK Discovery
 
