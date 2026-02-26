@@ -1,7 +1,10 @@
 /*
  * SQLite extension for roaring bitmap fingerprinting
  *
- * Functions:
+ * Aggregate:
+ *   roaring_build(value TEXT) -> BLOB    (hashes each value, builds bitmap)
+ *
+ * Scalar:
  *   roaring_build_json(json_array TEXT) -> BLOB
  *   roaring_cardinality(blob BLOB) -> INTEGER
  *   roaring_intersection_card(a BLOB, b BLOB) -> INTEGER
@@ -9,7 +12,7 @@
  *   roaring_jaccard(a BLOB, b BLOB) -> REAL
  *   roaring_to_base64(blob BLOB) -> TEXT
  *   roaring_from_base64(text TEXT) -> BLOB
- *   roaring_probe_json(probe_blob BLOB, refs_json TEXT) -> TEXT
+ *   roaring_containment_json(symbols_json TEXT, ref BLOB) -> REAL
  */
 
 #include <sqlite3ext.h>
@@ -19,6 +22,68 @@ SQLITE_EXTENSION_INIT1
 
 #include <cstdlib>
 #include <cstring>
+
+/* ========================================================================
+ * roaring_build(value) -> BLOB   [aggregate]
+ *
+ * Hashes each non-NULL text value via FNV-1a and adds to a roaring bitmap.
+ * Equivalent to DuckDB's roaring_build() aggregate.
+ * ======================================================================== */
+
+struct RoaringAggCtx {
+    rfp_bitmap *bitmap;
+};
+
+static void sqlite_roaring_build_step(sqlite3_context *ctx, int argc, sqlite3_value **argv) {
+    if (argc != 1 || sqlite3_value_type(argv[0]) == SQLITE_NULL) {
+        return;
+    }
+
+    auto *agg = static_cast<RoaringAggCtx *>(
+        sqlite3_aggregate_context(ctx, sizeof(RoaringAggCtx)));
+    if (!agg) return;
+
+    if (!agg->bitmap) {
+        agg->bitmap = rfp_create();
+    }
+
+    const void *data = sqlite3_value_text(argv[0]);
+    int len = sqlite3_value_bytes(argv[0]);
+    rfp_add_hash(agg->bitmap, data, static_cast<size_t>(len));
+}
+
+static void sqlite_roaring_build_final(sqlite3_context *ctx) {
+    auto *agg = static_cast<RoaringAggCtx *>(
+        sqlite3_aggregate_context(ctx, 0));
+
+    if (!agg || !agg->bitmap) {
+        /* No rows / all NULLs — return empty bitmap */
+        rfp_bitmap *empty = rfp_create();
+        size_t size = rfp_serialized_size(empty);
+        void *buf = sqlite3_malloc64(static_cast<sqlite3_int64>(size));
+        if (buf) {
+            rfp_serialize(empty, static_cast<char *>(buf), size);
+            sqlite3_result_blob(ctx, buf, static_cast<int>(size), sqlite3_free);
+        } else {
+            sqlite3_result_error_nomem(ctx);
+        }
+        rfp_free(empty);
+        return;
+    }
+
+    size_t size = rfp_serialized_size(agg->bitmap);
+    void *buf = sqlite3_malloc64(static_cast<sqlite3_int64>(size));
+    if (!buf) {
+        rfp_free(agg->bitmap);
+        sqlite3_result_error_nomem(ctx);
+        return;
+    }
+    rfp_serialize(agg->bitmap, static_cast<char *>(buf), size);
+    rfp_free(agg->bitmap);
+    agg->bitmap = nullptr;
+
+    sqlite3_result_blob(ctx, buf, static_cast<int>(size), sqlite3_free);
+}
 
 /* ========================================================================
  * roaring_build_json(json_array TEXT) -> BLOB
@@ -276,6 +341,10 @@ __declspec(dllexport)
 int sqlite3_roaring_init(sqlite3 *db, char **pzErrMsg, const sqlite3_api_routines *pApi) {
     SQLITE_EXTENSION_INIT2(pApi);
     (void)pzErrMsg;
+
+    /* Aggregate: roaring_build(value) -> BLOB */
+    sqlite3_create_function(db, "roaring_build", 1, SQLITE_UTF8 | SQLITE_DETERMINISTIC,
+                            nullptr, nullptr, sqlite_roaring_build_step, sqlite_roaring_build_final);
 
     sqlite3_create_function(db, "roaring_build_json", 1, SQLITE_UTF8 | SQLITE_DETERMINISTIC,
                             nullptr, sqlite_roaring_build_json, nullptr, nullptr);

@@ -197,45 +197,40 @@ int main(void) {
         ");",
         "create fingerprints table");
 
+    /* Use roaring_build() aggregate — no JSON intermediate needed */
     exec(db,
         "INSERT INTO domain_fingerprints\n"
-        "SELECT 'us_states', COUNT(*),\n"
-        "       roaring_build_json('[' || GROUP_CONCAT('\"' || symbol || '\"') || ']')\n"
+        "SELECT 'us_states', COUNT(*), roaring_build(symbol)\n"
         "FROM domain_us_states;",
         "build us_states fingerprint");
 
     exec(db,
         "INSERT INTO domain_fingerprints\n"
-        "SELECT 'currencies', COUNT(*),\n"
-        "       roaring_build_json('[' || GROUP_CONCAT('\"' || symbol || '\"') || ']')\n"
+        "SELECT 'currencies', COUNT(*), roaring_build(symbol)\n"
         "FROM domain_currencies;",
         "build currencies fingerprint");
 
     exec(db,
         "INSERT INTO domain_fingerprints\n"
-        "SELECT 'http_status', COUNT(*),\n"
-        "       roaring_build_json('[' || GROUP_CONCAT('\"' || symbol || '\"') || ']')\n"
+        "SELECT 'http_status', COUNT(*), roaring_build(symbol)\n"
         "FROM domain_http_status;",
         "build http_status fingerprint");
 
     exec(db,
         "INSERT INTO domain_fingerprints\n"
-        "SELECT 'mime_types', COUNT(*),\n"
-        "       roaring_build_json('[' || GROUP_CONCAT('\"' || symbol || '\"') || ']')\n"
+        "SELECT 'mime_types', COUNT(*), roaring_build(symbol)\n"
         "FROM domain_mime_types;",
         "build mime_types fingerprint");
 
     exec(db,
         "INSERT INTO domain_fingerprints\n"
-        "SELECT 'languages', COUNT(*),\n"
-        "       roaring_build_json('[' || GROUP_CONCAT('\"' || symbol || '\"') || ']')\n"
+        "SELECT 'languages', COUNT(*), roaring_build(symbol)\n"
         "FROM domain_languages;",
         "build languages fingerprint");
 
     exec(db,
         "INSERT INTO domain_fingerprints\n"
-        "SELECT 'elements', COUNT(*),\n"
-        "       roaring_build_json('[' || GROUP_CONCAT('\"' || symbol || '\"') || ']')\n"
+        "SELECT 'elements', COUNT(*), roaring_build(symbol)\n"
         "FROM domain_elements;",
         "build elements fingerprint");
 
