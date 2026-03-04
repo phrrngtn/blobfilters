@@ -525,3 +525,17 @@ it.
 
 Steps 1–2 are tractable with the catalog as described. Steps 3–4 are harder
 and may require interactive/LLM-assisted refinement.
+
+### Self-Reinforcing Catalog
+
+The catalog improves through use. Each database crawled and each wild table
+classified feeds back into the catalog as queryable facts:
+
+- New domain fingerprints are added as columns are discovered.
+- Column names that score highly against existing domains become aliases
+  (via the bootstrapping query in "Domain Alias Bootstrapping" above).
+- Confirmed FK relationships extend the schema graph for future join
+  path inference.
+
+No retraining or model updates are needed — the system accumulates
+structured observations that directly improve future inversions.
