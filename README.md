@@ -83,11 +83,10 @@ blobfilters/
 ```bash
 cmake -B build \
   -DBUILD_SQLITE_EXTENSION=ON \   # SQLite extension + demo
+  -DBUILD_DUCKDB_EXTENSION=ON \   # DuckDB extension (requires: brew install duckdb)
   -DBUILD_PYTHON_BINDINGS=ON \    # Python nanobind module
   -DBUILD_TESTS=ON                # Tests + fingerprint demo
 ```
-
-The DuckDB extension is built separately via `make` using DuckDB's extension-ci-tools.
 
 ## Design
 

@@ -5,10 +5,15 @@
 --  values, builds fingerprints into a unified table, then probes
 --  "wild" collections of symbols against all domains.
 --
---  Usage:
+--  Build the DuckDB extension first:
+--    git submodule update --init --recursive
+--    make
+--
+--  Usage (from project root):
 --    duckdb -unsigned < demo/duckdb_demo.sql
---    (after: LOAD 'build/release/extension/roaring/roaring.duckdb_extension';)
 -- ================================================================
+
+LOAD 'build/roaring.duckdb_extension';
 
 -- =================================================================
 -- STEP 1: Create domain tables with real symbol values
@@ -118,7 +123,7 @@ SELECT 'elements', COUNT(*), roaring_build(symbol) FROM domain_elements;
 SELECT domain_name,
        symbol_count,
        roaring_cardinality(fingerprint) AS fp_cardinality,
-       LENGTH(fingerprint) AS blob_bytes
+       octet_length(fingerprint) AS blob_bytes
 FROM domain_fingerprints
 ORDER BY symbol_count DESC;
 

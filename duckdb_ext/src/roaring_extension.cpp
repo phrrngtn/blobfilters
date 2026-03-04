@@ -91,9 +91,9 @@ struct RoaringBuildOp {
         target.Combine(const_cast<STATE &>(source));
     }
 
-    template <class STATE>
-    static void Finalize(STATE &state, AggregateFinalizeData &finalize_data) {
-        finalize_data.ReturnString(state.Serialize(finalize_data.result));
+    template <class RESULT_TYPE, class STATE>
+    static void Finalize(STATE &state, RESULT_TYPE &target, AggregateFinalizeData &finalize_data) {
+        target = state.Serialize(finalize_data.result);
     }
 
     template <class STATE>

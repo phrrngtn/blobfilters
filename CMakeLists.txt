@@ -104,6 +104,52 @@ if(BUILD_SQLITE_EXTENSION)
 endif()
 
 #===--------------------------------------------------------------------===
+# DuckDB extension (optional — uses installed DuckDB, no submodules needed)
+#===--------------------------------------------------------------------===
+
+option(BUILD_DUCKDB_EXTENSION "Build DuckDB loadable extension" OFF)
+if(BUILD_DUCKDB_EXTENSION)
+    find_package(DuckDB QUIET)
+    if(DuckDB_FOUND)
+        message(STATUS "DuckDB found via cmake config: ${DuckDB_INCLUDE_DIRS}")
+    else()
+        # Fall back to well-known paths
+        find_path(DuckDB_INCLUDE_DIRS duckdb.hpp
+            HINTS /opt/homebrew/include /usr/local/include)
+        find_library(DuckDB_LIBRARIES duckdb
+            HINTS /opt/homebrew/lib /usr/local/lib)
+
+        if(NOT DuckDB_INCLUDE_DIRS OR NOT DuckDB_LIBRARIES)
+            message(FATAL_ERROR "DuckDB not found. Install via: brew install duckdb")
+        endif()
+        message(STATUS "DuckDB found: ${DuckDB_INCLUDE_DIRS}, ${DuckDB_LIBRARIES}")
+    endif()
+
+    add_library(roaring_duckdb MODULE duckdb_ext/src/roaring_extension.cpp)
+    target_link_libraries(roaring_duckdb PRIVATE roaring_fp ${DuckDB_LIBRARIES})
+    target_include_directories(roaring_duckdb PRIVATE ${DuckDB_INCLUDE_DIRS})
+
+    target_include_directories(roaring_duckdb PRIVATE
+        ${CMAKE_SOURCE_DIR}/include
+        ${CMAKE_SOURCE_DIR}/duckdb_ext/src/include
+    )
+    set_target_properties(roaring_duckdb PROPERTIES
+        PREFIX ""
+        OUTPUT_NAME "roaring"
+        SUFFIX ".duckdb_extension"
+    )
+
+    # Append DuckDB extension metadata footer after building
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    add_custom_command(TARGET roaring_duckdb POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E echo "Appending DuckDB extension metadata..."
+        COMMAND Python3::Interpreter ${CMAKE_SOURCE_DIR}/scripts/append_duckdb_metadata.py
+            $<TARGET_FILE:roaring_duckdb>
+        VERBATIM
+    )
+endif()
+
+#===--------------------------------------------------------------------===
 # Tests and demo
 #===--------------------------------------------------------------------===
 
