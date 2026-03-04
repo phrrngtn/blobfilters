@@ -1,267 +1,99 @@
-# DuckDB Roaring Bitmap Extension
+# Blobfilters
 
-High-performance set operations using [Roaring Bitmaps](https://roaringbitmap.org/) for column fingerprinting and domain inference in DuckDB.
+A lightweight library that fingerprints the *values* in any data column — from a database, spreadsheet, PDF, or API — into compact roaring bitmaps. Given a "wild" table you've never seen before, it can tell you in microseconds which columns are US states, which are currency codes, which are customer IDs — by probing the actual data against a catalog of known domains. No ML, no training data, no GPU — just hash, intersect, and count. It runs as a SQLite extension, a DuckDB extension, or a Python library, and the entire classifier is a single portable database file.
 
-## Overview
+The endgame: **query inversion** — reconstructing the probable `SELECT ... FROM ... JOIN ...` that produced any table you encounter in the wild.
 
-This extension provides functions to:
-- Build compact bitmap fingerprints from column values
-- Compute set intersection, containment, and Jaccard similarity
-- Enable fast column matching for schema inference on unlabeled data
+## How It Works
+
+Each **domain** (the set of values a column can take) is fingerprinted by hashing its symbols via FNV-1a into a [roaring bitmap](https://roaringbitmap.org/). To classify a wild column, hash its distinct values into a probe bitmap and compare:
+
+- **Containment** = |probe ∩ domain| / |probe| — "what fraction of my values belong to this domain?"
+- **Jaccard** = |probe ∩ domain| / |probe ∪ domain| — "how similar are the two sets?"
+
+This runs in microseconds per comparison. A 1000-symbol probe against 500 stored domains completes in well under 1ms.
 
 ## Quick Start
 
 ```bash
-# Build
-mkdir build && cd build
-cmake ..
-cmake --build .
+# Build core library + SQLite extension + demos
+cmake -B build -DBUILD_SQLITE_EXTENSION=ON
+cmake --build build
 
-# Run the demo
-./fingerprint_demo
+# Run the SQLite demo
+./build/sqlite_demo
 
-# Or run tests
-./test_roaring
-```
-
-## Prerequisites
-
-- **CMake** 3.14+
-- **C compiler** (gcc, clang, or MSVC)
-- **DuckDB** installed with development headers
-  - macOS: `brew install duckdb`
-  - Linux: Download from [DuckDB releases](https://github.com/duckdb/duckdb/releases)
-
-## Building
-
-### Standard Build
-
-```bash
-git clone <this-repo>
-cd duckdb_bit_filter
-
-mkdir build && cd build
-cmake ..
-cmake --build .
-```
-
-This produces:
-- `libroaring_extension.duckdb_extension` - The extension library
-- `test_roaring` - Unit test executable
-- `fingerprint_demo` - Interactive demo
-
-### Build Options
-
-```bash
-# Debug build
-cmake -DCMAKE_BUILD_TYPE=Debug ..
-
-# Specify DuckDB location
-cmake -DDUCKDB_ROOT=/path/to/duckdb ..
-
-# Link against DuckDB for development
-cmake -DLINK_DUCKDB=ON ..
-```
-
-## Usage
-
-### Method 1: Linked Executable (Recommended)
-
-Due to DuckDB v1.4+ requiring signed extension metadata, the simplest approach is to link your application directly:
-
-```c
-#include "duckdb.h"
-
-// Declare the init function
-extern void roaring_extension_init(duckdb_connection conn);
-
-int main() {
-    duckdb_database db;
-    duckdb_connection conn;
-
-    duckdb_open(NULL, &db);
-    duckdb_connect(db, &conn);
-
-    // Register extension functions
-    roaring_extension_init(conn);
-
-    // Now use the functions in SQL
-    duckdb_query(conn, "SELECT roaring_cardinality(roaring_build(i)) FROM range(1,1001) t(i)", ...);
-
-    duckdb_disconnect(&conn);
-    duckdb_close(&db);
-}
-```
-
-Link with: `-lduckdb -L/path/to/build -lroaring_extension`
-
-### Method 2: Dynamic Loading (Requires Extension Signing)
-
-For production dynamic loading, build using [DuckDB's extension template](https://github.com/duckdb/extension-template) which handles signing and metadata:
-
-```sql
--- If using a properly signed extension:
-LOAD 'roaring';
-
-SELECT roaring_cardinality(roaring_build(id)) FROM my_table;
+# Run tests
+./build/test_roaring
 ```
 
 ## Functions
 
-### `roaring_build(column) → BLOB`
+Available in both SQLite and DuckDB extensions:
 
-Aggregate function that builds a Roaring Bitmap from column values.
+| Function | Type | Description |
+|---|---|---|
+| `roaring_build(value)` | aggregate | Hash each value, build bitmap |
+| `roaring_build_json(json_array)` | scalar | Build bitmap from JSON array of strings |
+| `roaring_cardinality(blob)` | scalar | Number of elements in bitmap |
+| `roaring_intersection_card(a, b)` | scalar | \|A ∩ B\| |
+| `roaring_containment(probe, ref)` | scalar | \|probe ∩ ref\| / \|probe\| |
+| `roaring_jaccard(a, b)` | scalar | \|A ∩ B\| / \|A ∪ B\| |
+| `roaring_containment_json(json, ref)` | scalar | Build probe from JSON, return containment |
+| `roaring_to_base64(blob)` | scalar | Serialize bitmap to base64 text |
+| `roaring_from_base64(text)` | scalar | Deserialize bitmap from base64 |
 
-```sql
--- Build fingerprint from integer column
-SELECT roaring_build(user_id) AS fp FROM users;
-
--- Build fingerprint from string column (values are hashed)
-SELECT roaring_build(email) AS fp FROM users;
-
--- Store fingerprints in a table
-CREATE TABLE fingerprints AS
-SELECT 'users' AS tbl, 'email' AS col, roaring_build(email) AS fp
-FROM users;
-```
-
-**Supported types**: All integer types, VARCHAR, BLOB
-
-### `roaring_cardinality(bitmap) → UBIGINT`
-
-Returns the number of elements in the bitmap.
+## Example: Domain Detection
 
 ```sql
-SELECT roaring_cardinality(roaring_build(id)) AS distinct_count
-FROM orders;
-```
+-- Build domain fingerprints
+INSERT INTO domain_fingerprints
+SELECT 'us_states', COUNT(*), roaring_build(state_name)
+FROM us_states;
 
-### `roaring_intersection_card(a, b) → UBIGINT`
-
-Returns |A ∩ B| - the count of elements in both bitmaps.
-
-```sql
-WITH a AS (SELECT roaring_build(i) AS bm FROM range(1,101) t(i)),
-     b AS (SELECT roaring_build(i) AS bm FROM range(51,151) t(i))
-SELECT roaring_intersection_card(a.bm, b.bm) AS overlap
-FROM a, b;
--- Returns: 50
-```
-
-### `roaring_containment(probe, reference) → DOUBLE`
-
-Returns |probe ∩ reference| / |probe| - what fraction of probe values exist in reference.
-
-```sql
--- "What fraction of my input values match the stored column?"
-SELECT roaring_containment(input_fp, stored_fp) AS match_ratio
-FROM ...
-```
-
-### `roaring_jaccard(a, b) → DOUBLE`
-
-Returns |A ∩ B| / |A ∪ B| - Jaccard similarity coefficient.
-
-```sql
-SELECT roaring_jaccard(fp1, fp2) AS similarity
-FROM ...
-```
-
-## Example: Column Fingerprint Matching
-
-```sql
--- Step 1: Build fingerprints from known database columns
-CREATE TABLE column_fingerprints AS
-SELECT
-    'customers' AS source_table,
-    'customer_id' AS source_column,
-    roaring_build(customer_id) AS fingerprint
-FROM customers
-UNION ALL
-SELECT 'products', 'sku', roaring_build(sku) FROM products
-UNION ALL
-SELECT 'orders', 'order_id', roaring_build(order_id) FROM orders;
-
--- Step 2: Given unlabeled input data, build its fingerprint
-CREATE TABLE input_data AS
-SELECT * FROM read_csv('unknown_column.csv');
-
--- Step 3: Find best matches
-WITH input_fp AS (
-    SELECT roaring_build(value) AS fp,
-           roaring_cardinality(roaring_build(value)) AS card
-    FROM input_data
+-- Probe a wild column against all domains
+WITH probe AS (
+    SELECT roaring_build(value) AS fp FROM wild_column
 )
-SELECT
-    f.source_table,
-    f.source_column,
-    roaring_intersection_card(i.fp, f.fingerprint) AS overlap,
-    roaring_containment(i.fp, f.fingerprint) AS containment
-FROM column_fingerprints f, input_fp i
-WHERE roaring_cardinality(f.fingerprint) BETWEEN i.card * 0.1 AND i.card * 10  -- Cardinality pruning
-ORDER BY containment DESC
-LIMIT 5;
+SELECT d.domain_name,
+       roaring_containment(probe.fp, d.fingerprint) AS containment
+FROM domain_fingerprints d, probe
+ORDER BY containment DESC;
 ```
 
-## Python Integration
-
-The serialized bitmaps are compatible with [pyroaring](https://github.com/Ezibenroc/PyRoaringBitMap):
-
-```python
-from pyroaring import BitMap
-import duckdb
-
-# Build bitmap in Python
-bm = BitMap()
-for val in my_values:
-    bm.add(hash(val) & 0xFFFFFFFF)  # 32-bit hash
-
-# Use in DuckDB
-conn = duckdb.connect()
-conn.execute("SELECT roaring_containment(?, stored_fp) FROM fingerprints", [bm.serialize()])
-
-# Or retrieve and use in Python
-result = conn.execute("SELECT fingerprint FROM fingerprints WHERE ...").fetchone()
-stored_bm = BitMap.deserialize(result[0])
-print(f"Jaccard: {len(bm & stored_bm) / len(bm | stored_bm)}")
-```
-
-## Performance Notes
-
-- **Cardinality pruning**: Filter candidates by cardinality ratio before computing similarity
-- **Roaring compression**: Bitmaps automatically compress runs and sparse regions
-- **SIMD acceleration**: CRoaring uses AVX2/SSE4 when available
-- **No false positives**: Unlike Bloom filters, intersection counts are exact
-
-## Project Structure
+## Architecture
 
 ```
-duckdb_bit_filter/
-├── CMakeLists.txt              # Build configuration
-├── README.md                   # This file
-├── run_demo.sh                 # Demo script
-├── src/
-│   ├── roaring_extension.c     # Main extension source
-│   └── include/
-│       └── roaring_extension.h
-├── third_party/roaring/        # CRoaring amalgamation
-│   ├── roaring.c
-│   └── roaring.h
-├── test/
-│   ├── test_roaring.c          # Unit tests
-│   └── sql/roaring_test.sql    # SQL test script
+blobfilters/
+├── include/roaring_fp.h          # Core C API
+├── src/roaring_fp.cpp            # Core implementation (CRoaring + nlohmann/json)
+├── sqlite_ext/                   # SQLite loadable extension
+├── duckdb_ext/                   # DuckDB extension
+├── python/                       # Python bindings (nanobind)
+├── third_party/roaring/          # CRoaring amalgamation
 ├── demo/
-│   └── fingerprint_demo.c      # Interactive demo
-└── build/                      # Build output
+│   ├── sqlite_demo.c             # SQLite demo (statically linked)
+│   └── duckdb_demo.sql           # DuckDB demo (SQL script)
+└── test/
+    └── test_roaring.c            # Core library tests
 ```
+
+## Build Options
+
+```bash
+cmake -B build \
+  -DBUILD_SQLITE_EXTENSION=ON \   # SQLite extension + demo
+  -DBUILD_PYTHON_BINDINGS=ON \    # Python nanobind module
+  -DBUILD_TESTS=ON                # Tests + fingerprint demo
+```
+
+The DuckDB extension is built separately via `make` using DuckDB's extension-ci-tools.
+
+## Design
+
+See [DESIGN.md](DESIGN.md) for the full vision: universal catalog schema, page classification pipeline, histogram triage, FK discovery, and query inversion.
 
 ## License
 
 - Extension code: MIT
 - CRoaring: Apache 2.0 / MIT dual license
-
-## References
-
-- [Roaring Bitmaps](https://roaringbitmap.org/)
-- [CRoaring](https://github.com/RoaringBitmap/CRoaring)
-- [DuckDB Extension Development](https://duckdb.org/docs/extensions/overview)
