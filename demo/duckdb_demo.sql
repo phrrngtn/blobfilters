@@ -136,6 +136,7 @@ ORDER BY symbol_count DESC;
 
 SELECT '>>> STEP 3: Probe wild symbols via CROSS JOIN' AS info;
 
+.timer on
 WITH probe AS (
     SELECT roaring_build_json(
         '["California","Texas","New York","Florida","Ohio",
@@ -250,5 +251,181 @@ SELECT
 FROM domain_fps d, probe
 WHERE roaring_intersection_card(probe.fp, d.fingerprint) > 0
 ORDER BY containment DESC;
+
+-- =================================================================
+-- STEP 8: Histogram fingerprint — metadata-only domain detection
+--
+-- Simulates what you'd get from sys.dm_db_stats_histogram:
+-- boundary values + frequency counts, no data access needed.
+-- =================================================================
+
+SELECT '>>> STEP 8: Build histogram fingerprint from simulated metadata' AS info;
+
+-- Simulate a SQL Server histogram for a state_code column
+-- (low cardinality, fully discrete, high repeatability)
+CREATE TABLE hist_state_code AS
+SELECT * FROM (VALUES
+    ('Alabama',      28000.0, 0.0, 0.0, 0.0),
+    ('Alaska',        5000.0, 0.0, 0.0, 0.0),
+    ('Arizona',      22000.0, 0.0, 0.0, 0.0),
+    ('California',  120000.0, 0.0, 0.0, 0.0),
+    ('Colorado',     18000.0, 0.0, 0.0, 0.0),
+    ('Florida',      65000.0, 0.0, 0.0, 0.0),
+    ('Georgia',      32000.0, 0.0, 0.0, 0.0),
+    ('New York',     58000.0, 0.0, 0.0, 0.0),
+    ('Ohio',         35000.0, 0.0, 0.0, 0.0),
+    ('Texas',        85000.0, 0.0, 0.0, 0.0)
+) AS t(range_high_key, equal_rows, range_rows, distinct_range_rows, average_range_rows);
+
+-- Build histogram fingerprint
+CREATE TABLE hist_fp_state AS
+SELECT roaring_build_histogram(
+    range_high_key, equal_rows, range_rows,
+    distinct_range_rows, average_range_rows
+) AS hist_fp
+FROM hist_state_code;
+
+-- Show shape metrics (expect: fully discrete, high repeatability)
+SELECT '>>> Shape metrics for state_code histogram:' AS info;
+SELECT roaring_histogram_shape(hist_fp) AS shape FROM hist_fp_state;
+
+-- =================================================================
+-- STEP 9: Compare histogram fingerprint against extensional domains
+-- =================================================================
+
+SELECT '>>> STEP 9: Weighted containment — histogram vs domain fingerprints' AS info;
+
+SELECT
+    d.domain_name,
+    d.symbol_count                                            AS domain_size,
+    roaring_cardinality(roaring_histogram_bitmap(h.hist_fp))  AS hist_keys,
+    roaring_histogram_containment(h.hist_fp, d.fingerprint)   AS weighted_containment,
+    roaring_containment(roaring_histogram_bitmap(h.hist_fp),
+                        d.fingerprint)                        AS unweighted_containment
+FROM domain_fingerprints AS d, hist_fp_state AS h
+ORDER BY weighted_containment DESC;
+
+-- =================================================================
+-- STEP 10: Contrast with a continuous/measure-like histogram
+-- =================================================================
+
+SELECT '>>> STEP 10: Continuous histogram (simulated amount column)' AS info;
+
+CREATE TABLE hist_amount AS
+SELECT * FROM (VALUES
+    ('100.00',   1.0, 5000.0,  500.0, 10.0),
+    ('500.00',   2.0, 8000.0,  800.0, 10.0),
+    ('1000.00',  1.0, 6000.0,  600.0, 10.0),
+    ('5000.00',  1.0, 4000.0,  400.0, 10.0),
+    ('10000.00', 1.0, 3000.0,  300.0, 10.0)
+) AS t(range_high_key, equal_rows, range_rows, distinct_range_rows, average_range_rows);
+
+CREATE TABLE hist_fp_amount AS
+SELECT roaring_build_histogram(
+    range_high_key, equal_rows, range_rows,
+    distinct_range_rows, average_range_rows
+) AS hist_fp
+FROM hist_amount;
+
+-- Compare shapes: state_code (dimension) vs amount (measure)
+SELECT
+    'state_code (dimension)' AS column_type,
+    roaring_histogram_shape(hist_fp) AS shape
+FROM hist_fp_state
+UNION ALL
+SELECT
+    'amount (measure)',
+    roaring_histogram_shape(hist_fp)
+FROM hist_fp_amount;
+
+-- Shape similarity distance (0 = identical, higher = more different)
+SELECT roaring_histogram_similarity(s.hist_fp, a.hist_fp) AS shape_distance
+FROM hist_fp_state AS s, hist_fp_amount AS a;
+
+-- =================================================================
+-- STEP 11: Source-agnostic histogram — 2-arg (key, weight)
+--
+-- Universal path: works with TABLESAMPLE, pg_stats, blobboxes,
+-- Pandas value_counts(), or any (value, frequency) pairs.
+-- =================================================================
+
+SELECT '>>> STEP 11: Source-agnostic histogram from simulated TABLESAMPLE' AS info;
+
+-- Simulate: SELECT state, COUNT(*) FROM orders TABLESAMPLE BERNOULLI(1) GROUP BY state
+CREATE TABLE sample_state AS
+SELECT * FROM (VALUES
+    ('Alabama',     280),
+    ('Alaska',       50),
+    ('Arizona',     220),
+    ('California', 1200),
+    ('Colorado',    180),
+    ('Florida',     650),
+    ('Georgia',     320),
+    ('New York',    580),
+    ('Ohio',        350),
+    ('Texas',       850)
+) AS t(state_value, sample_count);
+
+-- Build with 2-arg form: just key + weight
+CREATE TABLE sample_fp_state AS
+SELECT roaring_build_histogram(state_value, sample_count::DOUBLE) AS hist_fp
+FROM sample_state;
+
+-- Inject shape computed in SQL (the SQL layer knows the source semantics)
+CREATE TABLE sample_fp_shaped AS
+SELECT roaring_histogram_set_shape(
+    hist_fp,
+    '{"cardinality_ratio":' || (10.0 / 4680) || ','
+    || '"repeatability":' || (4680.0 / 10) || ','
+    || '"discreteness":1.0,'
+    || '"range_density":0.0,'
+    || '"sample_pct":1.0,'
+    || '"source_query":"TABLESAMPLE BERNOULLI(1)"}'
+) AS hist_fp
+FROM sample_fp_state;
+
+-- Show shape (includes custom fields)
+SELECT roaring_histogram_shape(hist_fp) AS shape FROM sample_fp_shaped;
+
+-- Compare against extensional domains — should match us_states
+SELECT
+    d.domain_name,
+    roaring_histogram_containment(h.hist_fp, d.fingerprint)   AS weighted_containment,
+    roaring_containment(roaring_histogram_bitmap(h.hist_fp),
+                        d.fingerprint)                        AS unweighted_containment
+FROM domain_fingerprints AS d, sample_fp_shaped AS h
+ORDER BY weighted_containment DESC;
+
+-- =================================================================
+-- STEP 12: Cross-source shape comparison
+--
+-- Compare histogram shapes from different sources:
+-- SQL Server statistics vs TABLESAMPLE — same column, similar shape.
+-- =================================================================
+
+SELECT '>>> STEP 12: Cross-source shape comparison' AS info;
+
+SELECT
+    'sqlserver_histogram' AS source,
+    roaring_histogram_shape(hist_fp) AS shape
+FROM hist_fp_state
+UNION ALL
+SELECT
+    'tablesample',
+    roaring_histogram_shape(hist_fp)
+FROM sample_fp_shaped
+UNION ALL
+SELECT
+    'sqlserver_amount',
+    roaring_histogram_shape(hist_fp)
+FROM hist_fp_amount;
+
+-- Same column from different sources: should be similar
+SELECT roaring_histogram_similarity(a.hist_fp, b.hist_fp) AS state_vs_sample
+FROM hist_fp_state AS a, sample_fp_shaped AS b;
+
+-- Different columns: should be very different
+SELECT roaring_histogram_similarity(a.hist_fp, b.hist_fp) AS state_vs_amount
+FROM sample_fp_shaped AS a, hist_fp_amount AS b;
 
 SELECT '>>> Demo complete.' AS info;

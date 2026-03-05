@@ -58,6 +58,78 @@ char *rfp_probe_json(const char *symbols_json, size_t json_len,
                      const rfp_bitmap *const *refs, size_t num_refs);
 void  rfp_free_string(char *s);
 
+/* ========================================================================
+ * Histogram fingerprint — combines bitmap with frequency weights and shape
+ * ======================================================================== */
+
+typedef struct rfp_histogram rfp_histogram;
+
+rfp_histogram *rfp_histogram_create(void);
+void           rfp_histogram_free(rfp_histogram *hf);
+
+/* Add a value with a frequency weight (source-agnostic).
+ * This is the universal entry point — works for any source:
+ *   TABLESAMPLE:  key=sampled_value, weight=COUNT(*)
+ *   pg_stats MCV: key=most_common_val, weight=freq*reltuples
+ *   blobboxes:    key=extracted_cell, weight=occurrence_count
+ *   full take:    key=column_value, weight=1.0 */
+void rfp_histogram_add_value(rfp_histogram *hf,
+                             const char *key, size_t key_len,
+                             double weight);
+
+/* Add a SQL Server histogram step (5-column convenience wrapper).
+ * Accumulates range_rows/distinct_range_rows for shape computation. */
+void rfp_histogram_add_step(rfp_histogram *hf,
+                            const char *key, size_t key_len,
+                            double equal_rows, double range_rows,
+                            double distinct_range_rows, double avg_range_rows);
+
+/* Set shape metrics from an externally-computed JSON object.
+ * Recognizes well-known keys: cardinality_ratio, repeatability, discreteness,
+ * range_density. Any additional keys are preserved as-is.
+ * Call this INSTEAD of finalize when shape is computed in the SQL layer. */
+void rfp_histogram_set_shape(rfp_histogram *hf,
+                             const char *shape_json, size_t len);
+
+/* Set provenance tag (e.g., "full_take", "tablesample", "sqlserver_histogram",
+ * "pg_stats", "blobboxes"). Stored in the JSON envelope. */
+void rfp_histogram_set_source(rfp_histogram *hf,
+                              const char *source, size_t len);
+
+/* Finalize shape metrics from accumulated step data.
+ * Only needed for the 5-arg add_step path (SQL Server histograms).
+ * No-op if shape was already set via set_shape. */
+void rfp_histogram_finalize(rfp_histogram *hf);
+
+/* Serialize to/from JSON string. Caller must free returned string with rfp_free_string(). */
+char          *rfp_histogram_to_json(const rfp_histogram *hf);
+rfp_histogram *rfp_histogram_from_json(const char *json, size_t len);
+
+/* Extract the raw bitmap (for use with existing rfp_containment etc.)
+ * Returns a pointer owned by the histogram — do NOT free it. */
+const rfp_bitmap *rfp_histogram_bitmap(const rfp_histogram *hf);
+
+/* Weighted containment: sum(equal_rows for matched keys) / sum(all equal_rows)
+ * "What fraction of the column's rows have values in this domain?" */
+double rfp_histogram_weighted_containment(const rfp_histogram *hf,
+                                          const rfp_bitmap *domain);
+
+/* Shape metric accessors */
+double rfp_histogram_cardinality_ratio(const rfp_histogram *hf);
+double rfp_histogram_repeatability(const rfp_histogram *hf);
+double rfp_histogram_discreteness(const rfp_histogram *hf);
+double rfp_histogram_range_density(const rfp_histogram *hf);
+
+/* Return full shape as JSON string (well-known + extra fields).
+ * Caller must free returned string with rfp_free_string(). */
+char *rfp_histogram_shape_json(const rfp_histogram *hf);
+
+/* Shape similarity between two histograms (Euclidean distance in
+ * normalized feature space: cardinality_ratio, repeatability, discreteness).
+ * Returns 0.0 for identical shapes, higher for more different. */
+double rfp_histogram_shape_similarity(const rfp_histogram *a,
+                                      const rfp_histogram *b);
+
 #ifdef __cplusplus
 }
 #endif

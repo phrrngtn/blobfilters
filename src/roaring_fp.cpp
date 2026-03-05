@@ -11,8 +11,10 @@
 
 #include <nlohmann/json.hpp>
 
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -331,6 +333,374 @@ char *rfp_probe_json(const char *symbols_json, size_t json_len,
 
 void rfp_free_string(char *s) {
     std::free(s);
+}
+
+/* ========================================================================
+ * Histogram fingerprint
+ * ======================================================================== */
+
+struct rfp_histogram {
+    rfp_bitmap *bitmap;
+    /* hash -> weight for each key */
+    std::map<uint32_t, double> weights;
+    /* accumulated stats for SQL Server 5-arg finalization */
+    double total_rows;
+    double total_equal_rows;
+    double total_range_rows;
+    double total_distinct_range_rows;
+    uint32_t steps;
+    uint32_t zero_range_steps; /* steps where range_rows == 0 (discrete) */
+    /* shape metrics (well-known fields) */
+    double cardinality_ratio;
+    double repeatability;
+    double discreteness;
+    double range_density;
+    /* extra shape keys from external JSON (beyond well-known fields) */
+    json shape_extra;
+    /* provenance */
+    std::string source;
+    bool finalized;
+};
+
+rfp_histogram *rfp_histogram_create(void) {
+    auto *hf = new (std::nothrow) rfp_histogram;
+    if (!hf) return nullptr;
+    hf->bitmap = rfp_create();
+    if (!hf->bitmap) {
+        delete hf;
+        return nullptr;
+    }
+    hf->total_rows = 0;
+    hf->total_equal_rows = 0;
+    hf->total_range_rows = 0;
+    hf->total_distinct_range_rows = 0;
+    hf->steps = 0;
+    hf->zero_range_steps = 0;
+    hf->cardinality_ratio = 0;
+    hf->repeatability = 0;
+    hf->discreteness = 0;
+    hf->range_density = 0;
+    hf->shape_extra = json::object();
+    hf->finalized = false;
+    return hf;
+}
+
+void rfp_histogram_free(rfp_histogram *hf) {
+    if (!hf) return;
+    rfp_free(hf->bitmap);
+    delete hf;
+}
+
+void rfp_histogram_add_value(rfp_histogram *hf,
+                             const char *key, size_t key_len,
+                             double weight) {
+    if (!hf || !key) return;
+
+    uint32_t hash = fnv1a(key, key_len);
+    rfp_add_uint32(hf->bitmap, hash);
+    hf->weights[hash] += weight;
+    hf->total_equal_rows += weight;
+    hf->steps++;
+}
+
+void rfp_histogram_add_step(rfp_histogram *hf,
+                            const char *key, size_t key_len,
+                            double equal_rows, double range_rows,
+                            double distinct_range_rows, double avg_range_rows) {
+    if (!hf || !key) return;
+
+    uint32_t hash = fnv1a(key, key_len);
+    rfp_add_uint32(hf->bitmap, hash);
+    hf->weights[hash] = equal_rows;
+
+    hf->total_equal_rows += equal_rows;
+    hf->total_range_rows += range_rows;
+    hf->total_distinct_range_rows += distinct_range_rows;
+    hf->steps++;
+    if (range_rows == 0) hf->zero_range_steps++;
+
+    (void)avg_range_rows; /* tracked via range_rows / distinct_range_rows */
+}
+
+void rfp_histogram_set_shape(rfp_histogram *hf,
+                             const char *shape_json, size_t len) {
+    if (!hf || !shape_json || len == 0) return;
+
+    try {
+        auto j = json::parse(shape_json, shape_json + len);
+        if (!j.is_object()) return;
+
+        /* Extract well-known fields into struct for similarity/getter use */
+        if (j.contains("cardinality_ratio")) hf->cardinality_ratio = j["cardinality_ratio"].get<double>();
+        if (j.contains("repeatability")) hf->repeatability = j["repeatability"].get<double>();
+        if (j.contains("discreteness")) hf->discreteness = j["discreteness"].get<double>();
+        if (j.contains("range_density")) hf->range_density = j["range_density"].get<double>();
+
+        /* Store any extra keys beyond the well-known ones */
+        hf->shape_extra = json::object();
+        for (auto &[key, val] : j.items()) {
+            if (key != "cardinality_ratio" && key != "repeatability" &&
+                key != "discreteness" && key != "range_density") {
+                hf->shape_extra[key] = val;
+            }
+        }
+
+        hf->finalized = true;
+    } catch (...) {
+        /* silently ignore parse errors */
+    }
+}
+
+void rfp_histogram_set_source(rfp_histogram *hf,
+                              const char *source, size_t len) {
+    if (!hf || !source) return;
+    hf->source.assign(source, len);
+}
+
+void rfp_histogram_finalize(rfp_histogram *hf) {
+    if (!hf || hf->steps == 0) return;
+    if (hf->finalized) return; /* shape already set via set_shape */
+
+    hf->total_rows = hf->total_equal_rows + hf->total_range_rows;
+
+    /* cardinality_ratio: distinct values / total rows
+     * distinct values ≈ steps (boundary values) + total_distinct_range_rows */
+    double distinct_values = hf->steps + hf->total_distinct_range_rows;
+    hf->cardinality_ratio = (hf->total_rows > 0)
+        ? distinct_values / hf->total_rows
+        : 0;
+
+    /* repeatability: average equal_rows per step */
+    hf->repeatability = hf->total_equal_rows / hf->steps;
+
+    /* discreteness: fraction of steps with zero range_rows */
+    hf->discreteness = static_cast<double>(hf->zero_range_steps) / hf->steps;
+
+    /* range_density: average distinct_range_rows per step (for non-zero range steps) */
+    uint32_t range_steps = hf->steps - hf->zero_range_steps;
+    hf->range_density = (range_steps > 0)
+        ? hf->total_distinct_range_rows / range_steps
+        : 0;
+
+    hf->finalized = true;
+}
+
+char *rfp_histogram_to_json(const rfp_histogram *hf) {
+    if (!hf) return nullptr;
+
+    try {
+        json j;
+        j["v"] = 2;
+
+        /* bitmap as base64 */
+        size_t b64_size = rfp_base64_size(hf->bitmap);
+        std::vector<char> b64_buf(b64_size + 1);
+        size_t written = rfp_to_base64(hf->bitmap, b64_buf.data(), b64_size);
+        b64_buf[written] = '\0';
+        j["bitmap"] = std::string(b64_buf.data(), written);
+
+        j["steps"] = hf->steps;
+
+        /* provenance */
+        if (!hf->source.empty()) {
+            j["source"] = hf->source;
+        }
+
+        /* shape as nested object — well-known fields + extras */
+        json shape;
+        shape["cardinality_ratio"] = hf->cardinality_ratio;
+        shape["repeatability"] = hf->repeatability;
+        shape["discreteness"] = hf->discreteness;
+        shape["range_density"] = hf->range_density;
+        /* merge in any extra shape keys from external set_shape */
+        if (!hf->shape_extra.empty()) {
+            for (auto &[key, val] : hf->shape_extra.items()) {
+                shape[key] = val;
+            }
+        }
+        j["shape"] = shape;
+
+        /* accumulation context (for Combine round-trip) */
+        j["total_rows"] = hf->total_rows;
+        j["total_equal_rows"] = hf->total_equal_rows;
+        j["total_range_rows"] = hf->total_range_rows;
+        j["total_distinct_range_rows"] = hf->total_distinct_range_rows;
+        j["zero_range_steps"] = hf->zero_range_steps;
+
+        /* weights: hash (as string) -> weight */
+        json w = json::object();
+        for (const auto &kv : hf->weights) {
+            w[std::to_string(kv.first)] = kv.second;
+        }
+        j["weights"] = w;
+
+        std::string out = j.dump();
+        char *result = static_cast<char *>(std::malloc(out.size() + 1));
+        if (!result) return nullptr;
+        std::memcpy(result, out.data(), out.size());
+        result[out.size()] = '\0';
+        return result;
+    } catch (...) {
+        return nullptr;
+    }
+}
+
+rfp_histogram *rfp_histogram_from_json(const char *json_str, size_t len) {
+    if (!json_str || len == 0) return nullptr;
+
+    try {
+        auto j = json::parse(json_str, json_str + len);
+
+        auto *hf = new (std::nothrow) rfp_histogram;
+        if (!hf) return nullptr;
+
+        /* Decode bitmap from base64 */
+        std::string b64 = j.value("bitmap", "");
+        hf->bitmap = rfp_from_base64(b64.c_str(), b64.size());
+        if (!hf->bitmap) {
+            hf->bitmap = rfp_create();
+        }
+
+        hf->steps = j.value("steps", (uint32_t)0);
+        hf->source = j.value("source", "");
+
+        /* Shape: v2 has nested "shape" object, v1 has flat fields */
+        hf->shape_extra = json::object();
+        if (j.contains("shape") && j["shape"].is_object()) {
+            auto &s = j["shape"];
+            hf->cardinality_ratio = s.value("cardinality_ratio", 0.0);
+            hf->repeatability = s.value("repeatability", 0.0);
+            hf->discreteness = s.value("discreteness", 0.0);
+            hf->range_density = s.value("range_density", 0.0);
+            /* Preserve extra shape keys */
+            for (auto &[key, val] : s.items()) {
+                if (key != "cardinality_ratio" && key != "repeatability" &&
+                    key != "discreteness" && key != "range_density") {
+                    hf->shape_extra[key] = val;
+                }
+            }
+        } else {
+            /* v1 flat format */
+            hf->cardinality_ratio = j.value("cardinality_ratio", 0.0);
+            hf->repeatability = j.value("repeatability", 0.0);
+            hf->discreteness = j.value("discreteness", 0.0);
+            hf->range_density = j.value("range_density", 0.0);
+        }
+
+        /* Restore accumulation fields */
+        hf->total_rows = j.value("total_rows", 0.0);
+        hf->total_equal_rows = j.value("total_equal_rows", 0.0);
+        hf->total_range_rows = j.value("total_range_rows", 0.0);
+        hf->total_distinct_range_rows = j.value("total_distinct_range_rows", 0.0);
+        hf->zero_range_steps = j.value("zero_range_steps", (uint32_t)0);
+
+        /* Reconstruct weights map */
+        if (j.contains("weights") && j["weights"].is_object()) {
+            for (auto &[key, val] : j["weights"].items()) {
+                uint32_t hash = static_cast<uint32_t>(std::stoul(key));
+                double weight = val.get<double>();
+                hf->weights[hash] = weight;
+            }
+            /* If total_equal_rows wasn't in JSON (old format), reconstruct from weights */
+            if (hf->total_equal_rows == 0 && !hf->weights.empty()) {
+                for (const auto &kv : hf->weights) {
+                    hf->total_equal_rows += kv.second;
+                }
+            }
+        }
+
+        hf->finalized = true;
+        return hf;
+    } catch (...) {
+        return nullptr;
+    }
+}
+
+const rfp_bitmap *rfp_histogram_bitmap(const rfp_histogram *hf) {
+    if (!hf) return nullptr;
+    return hf->bitmap;
+}
+
+double rfp_histogram_weighted_containment(const rfp_histogram *hf,
+                                          const rfp_bitmap *domain) {
+    if (!hf || !domain || hf->weights.empty()) return 0.0;
+
+    double matched_weight = 0;
+    double total_weight = 0;
+
+    for (const auto &kv : hf->weights) {
+        total_weight += kv.second;
+        /* Check if this hash is in the domain bitmap */
+        if (domain->roaring && roaring_bitmap_contains(domain->roaring, kv.first)) {
+            matched_weight += kv.second;
+        }
+    }
+
+    return (total_weight > 0) ? matched_weight / total_weight : 0.0;
+}
+
+double rfp_histogram_cardinality_ratio(const rfp_histogram *hf) {
+    return hf ? hf->cardinality_ratio : 0.0;
+}
+
+double rfp_histogram_repeatability(const rfp_histogram *hf) {
+    return hf ? hf->repeatability : 0.0;
+}
+
+double rfp_histogram_discreteness(const rfp_histogram *hf) {
+    return hf ? hf->discreteness : 0.0;
+}
+
+double rfp_histogram_range_density(const rfp_histogram *hf) {
+    return hf ? hf->range_density : 0.0;
+}
+
+char *rfp_histogram_shape_json(const rfp_histogram *hf) {
+    if (!hf) return nullptr;
+
+    try {
+        json shape;
+        shape["cardinality_ratio"] = hf->cardinality_ratio;
+        shape["repeatability"] = hf->repeatability;
+        shape["discreteness"] = hf->discreteness;
+        shape["range_density"] = hf->range_density;
+        if (!hf->shape_extra.empty()) {
+            for (auto &[key, val] : hf->shape_extra.items()) {
+                shape[key] = val;
+            }
+        }
+
+        std::string out = shape.dump();
+        char *result = static_cast<char *>(std::malloc(out.size() + 1));
+        if (!result) return nullptr;
+        std::memcpy(result, out.data(), out.size());
+        result[out.size()] = '\0';
+        return result;
+    } catch (...) {
+        return nullptr;
+    }
+}
+
+double rfp_histogram_shape_similarity(const rfp_histogram *a,
+                                      const rfp_histogram *b) {
+    if (!a || !b) return 1.0;
+
+    /* Normalize features to [0,1] range using reasonable bounds:
+     * - cardinality_ratio: already in [0,1]
+     * - repeatability: log-scale, normalize by log(max_reasonable)
+     * - discreteness: already in [0,1]
+     */
+    double cr_diff = a->cardinality_ratio - b->cardinality_ratio;
+
+    /* Log-scale repeatability: log(1 + r) / log(1 + 1e6) as normalizer */
+    double log_max = std::log(1.0 + 1e6);
+    double rep_a = std::log(1.0 + a->repeatability) / log_max;
+    double rep_b = std::log(1.0 + b->repeatability) / log_max;
+    double rep_diff = rep_a - rep_b;
+
+    double disc_diff = a->discreteness - b->discreteness;
+
+    return std::sqrt(cr_diff * cr_diff + rep_diff * rep_diff + disc_diff * disc_diff);
 }
 
 } /* extern "C" */

@@ -147,6 +147,162 @@ FROM stored_bitmap;
 -- Expected: 1000
 
 -- ============================================================
+-- Test 9: Histogram fingerprint — build and compare
+-- ============================================================
+
+-- Simulate a histogram from sys.dm_db_stats_histogram
+-- Low-cardinality dimension: state_code with 5 steps, all discrete
+CREATE OR REPLACE TABLE test_histogram AS
+SELECT * FROM (VALUES
+    ('AL', 10000.0, 0.0, 0.0, 0.0),
+    ('CA', 50000.0, 0.0, 0.0, 0.0),
+    ('NY', 40000.0, 0.0, 0.0, 0.0),
+    ('TX', 35000.0, 0.0, 0.0, 0.0),
+    ('FL', 25000.0, 0.0, 0.0, 0.0)
+) AS t(range_high_key, equal_rows, range_rows, distinct_range_rows, average_range_rows);
+
+-- Build histogram fingerprint
+CREATE OR REPLACE TABLE test_hist_fp AS
+SELECT roaring_build_histogram(
+    range_high_key, equal_rows, range_rows,
+    distinct_range_rows, average_range_rows
+) AS hist_fp
+FROM test_histogram;
+
+SELECT 'Histogram fingerprint built' AS status;
+SELECT hist_fp FROM test_hist_fp;
+
+-- Extract shape metrics
+SELECT roaring_histogram_shape(hist_fp) AS shape FROM test_hist_fp;
+
+-- Extract bitmap and check cardinality
+SELECT roaring_cardinality(roaring_histogram_bitmap(hist_fp)) AS bitmap_cardinality
+FROM test_hist_fp;
+-- Expected: 5
+
+-- ============================================================
+-- Test 10: Histogram vs extensional domain comparison
+-- ============================================================
+
+-- Build extensional domain containing AL, CA, NY, TX, FL + more states
+CREATE OR REPLACE TABLE test_states_domain AS
+SELECT roaring_build(state) AS domain FROM (VALUES
+    ('AL'),('CA'),('NY'),('TX'),('FL'),
+    ('OH'),('PA'),('IL'),('GA'),('NC')
+) AS t(state);
+
+-- Weighted containment: all histogram keys are in the domain
+-- (10000+50000+40000+35000+25000) / total = 1.0
+SELECT roaring_histogram_containment(h.hist_fp, d.domain) AS weighted_containment
+FROM test_hist_fp h, test_states_domain d;
+-- Expected: 1.0 (all histogram keys match)
+
+-- Unweighted bitmap containment
+SELECT roaring_containment(roaring_histogram_bitmap(h.hist_fp), d.domain) AS unweighted_containment
+FROM test_hist_fp h, test_states_domain d;
+-- Expected: 1.0
+
+-- ============================================================
+-- Test 11: Partial match — some histogram keys not in domain
+-- ============================================================
+
+-- Domain with only AL and CA
+CREATE OR REPLACE TABLE test_partial_domain AS
+SELECT roaring_build(state) AS domain FROM (VALUES
+    ('AL'),('CA')
+) AS t(state);
+
+-- Weighted: (10000+50000) / 160000 = 0.375
+SELECT roaring_histogram_containment(h.hist_fp, d.domain) AS weighted_containment
+FROM test_hist_fp h, test_partial_domain d;
+
+-- Unweighted: 2/5 = 0.4
+SELECT roaring_containment(roaring_histogram_bitmap(h.hist_fp), d.domain) AS unweighted_containment
+FROM test_hist_fp h, test_partial_domain d;
+
+-- ============================================================
+-- Test 12: Shape similarity between histograms
+-- ============================================================
+
+-- Build a continuous histogram (measures-like)
+CREATE OR REPLACE TABLE test_continuous_histogram AS
+SELECT * FROM (VALUES
+    ('100.00',  1.0, 5000.0, 500.0, 10.0),
+    ('200.00',  1.0, 5000.0, 500.0, 10.0),
+    ('300.00',  1.0, 5000.0, 500.0, 10.0),
+    ('400.00',  1.0, 5000.0, 500.0, 10.0),
+    ('500.00',  1.0, 5000.0, 500.0, 10.0)
+) AS t(range_high_key, equal_rows, range_rows, distinct_range_rows, average_range_rows);
+
+CREATE OR REPLACE TABLE test_cont_fp AS
+SELECT roaring_build_histogram(
+    range_high_key, equal_rows, range_rows,
+    distinct_range_rows, average_range_rows
+) AS hist_fp
+FROM test_continuous_histogram;
+
+-- Shape of continuous histogram (low discreteness, low repeatability)
+SELECT roaring_histogram_shape(hist_fp) AS continuous_shape FROM test_cont_fp;
+
+-- Similarity: discrete vs continuous should be high (different)
+SELECT roaring_histogram_similarity(d.hist_fp, c.hist_fp) AS shape_distance
+FROM test_hist_fp d, test_cont_fp c;
+-- Expected: > 0.1 (significantly different shapes)
+
+-- Self-similarity should be 0
+SELECT roaring_histogram_similarity(d.hist_fp, d.hist_fp) AS self_similarity
+FROM test_hist_fp d;
+-- Expected: 0.0
+
+-- ============================================================
+-- Test 13: Source-agnostic 2-arg histogram (key, weight)
+-- ============================================================
+
+-- Simulate TABLESAMPLE: SELECT state, COUNT(*) ... GROUP BY state
+CREATE OR REPLACE TABLE test_sample AS
+SELECT * FROM (VALUES
+    ('AL', 100.0),
+    ('CA', 500.0),
+    ('NY', 400.0),
+    ('TX', 350.0),
+    ('FL', 250.0)
+) AS t(state_value, sample_count);
+
+-- Build with 2-arg form
+CREATE OR REPLACE TABLE test_sample_fp AS
+SELECT roaring_build_histogram(state_value, sample_count) AS hist_fp
+FROM test_sample;
+
+SELECT roaring_cardinality(roaring_histogram_bitmap(hist_fp)) AS bitmap_cardinality
+FROM test_sample_fp;
+-- Expected: 5
+
+-- Weighted containment against known domain
+SELECT roaring_histogram_containment(h.hist_fp, d.domain) AS weighted_containment
+FROM test_sample_fp AS h, test_states_domain AS d;
+-- Expected: 1.0
+
+-- ============================================================
+-- Test 14: set_shape — inject externally-computed shape
+-- ============================================================
+
+CREATE OR REPLACE TABLE test_shaped_fp AS
+SELECT roaring_histogram_set_shape(
+    hist_fp,
+    '{"cardinality_ratio":0.05,"repeatability":320.0,"discreteness":1.0,"range_density":0.0,"source_query":"TABLESAMPLE"}'
+) AS hist_fp
+FROM test_sample_fp;
+
+-- Verify injected shape
+SELECT roaring_histogram_shape(hist_fp) AS shape FROM test_shaped_fp;
+-- Should include cardinality_ratio, repeatability, discreteness AND source_query
+
+-- Shape similarity: sample vs SQL Server histogram of same column
+SELECT roaring_histogram_similarity(a.hist_fp, b.hist_fp) AS sample_vs_histogram
+FROM test_shaped_fp AS a, test_hist_fp AS b;
+-- Expected: small distance (similar shapes)
+
+-- ============================================================
 -- Cleanup
 -- ============================================================
 
