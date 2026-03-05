@@ -488,6 +488,53 @@ The layering means that for a database with 500 columns, you might:
 - Roaring probe: 200 × 50 = 10,000 pairs → 30 high-scoring pairs
 - Remote validation: 30 targeted queries → 25 confirmed FK relationships
 
+## Architectural Boundaries
+
+Blobfilters is the **computation engine** — it builds fingerprints, compares them,
+and computes shape metrics. It is deliberately agnostic about data sources and
+result destinations.
+
+### What lives in blobfilters
+
+| Layer | Examples |
+|-------|----------|
+| C library | `rfp_create`, `rfp_histogram_build`, `rfp_histogram_weighted_containment` |
+| DB extensions | `roaring_build`, `roaring_build_histogram`, `roaring_containment_json` |
+| Demo/recipe SQL | `demo/sampling_demo.sql`, `sql/sampling/workflow_duckdb.sql` |
+
+### What lives elsewhere (rule4 or a dedicated orchestration project)
+
+| Concern | Why it doesn't belong here |
+|---------|---------------------------|
+| Schema scraping (`sys.columns`, `sys.tables`, `sys.schemas`, `pg_catalog`) | Dialect-specific catalog queries, ODBC connection management |
+| Schema topology TTST (time-series of table/column/FK structure) | Requires persistent catalog, versioning, diff logic |
+| PK/FK catalog analysis | Needs catalog metadata that blobfilters doesn't store |
+| Classification write-back (SQL Server extended properties) | Requires `RULE4.extended_property` view, MERGE semantics |
+| Classification rules/thresholds | Policy decisions (what containment score means "dimension") |
+
+### The contract
+
+Blobfilters produces classification *signals*:
+- Histogram fingerprint (JSON with embedded bitmap)
+- Shape metrics (cardinality_ratio, repeatability, discreteness, range_density)
+- Containment scores against domain fingerprints
+
+The consuming layer (rule4) applies *policy*:
+- Combines signals with catalog metadata (PK/FK membership, data types)
+- Decides classification labels (dimension, measure, degenerate dimension)
+- Writes results back as extended properties or catalog entries
+
+### Sampling as a boundary example
+
+The `sql/sampling/` directory contains DuckDB-native workflows that sample tables
+via `TABLESAMPLE`, UNPIVOT into `(column_name, value, freq)`, and feed into
+`roaring_build_histogram`. These are self-contained recipes that demonstrate how
+to use the primitives — they belong here.
+
+ODBC-based sampling workflows that target SQL Server or PostgreSQL
+(`odbc_query()` + dialect-specific `TABLESAMPLE` syntax) belong in rule4, because
+they require ODBC connection management and dialect-aware query generation.
+
 ## Complementary Signals (Future)
 
 Roaring bitmap probing is the fast, exact foundation. Additional signals can
