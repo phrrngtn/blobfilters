@@ -1,5 +1,7 @@
 # Blobfilters
 
+> **Note:** This code is almost entirely AI-authored (Claude, Anthropic), albeit under close human supervision, and is for research and experimentation purposes. Successful experiments may be re-implemented in a more coordinated and curated manner.
+
 A lightweight library that fingerprints the *values* in any data column — from a database, spreadsheet, PDF, or API — into compact roaring bitmaps. Given a "wild" table you've never seen before, it can tell you in microseconds which columns are US states, which are currency codes, which are customer IDs — by probing the actual data against a catalog of known domains. No ML, no training data, no GPU — just hash, intersect, and count. It runs as a SQLite extension, a DuckDB extension, or a Python library, and the entire classifier is a single portable database file.
 
 The endgame: **query inversion** — reconstructing the probable `SELECT ... FROM ... JOIN ...` that produced any table you encounter in the wild.
