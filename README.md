@@ -94,6 +94,10 @@ cmake -B build \
 
 See [DESIGN.md](DESIGN.md) for the full vision: universal catalog schema, page classification pipeline, histogram triage, FK discovery, and query inversion.
 
+## Origins
+
+Based on [oldmoe/roaringlite](https://github.com/oldmoe/roaringlite), a SQLite extension for CRoaring bitmap operations. blobfilters adds domain fingerprinting (containment/Jaccard probing), the blob extension build pattern (shared C core + DuckDB and Python bindings), and the [rbloom](https://github.com/KenanHanke/rbloom) Bloom filter library was a reference point during early evaluation of probabilistic set membership approaches.
+
 ## License
 
 - Extension code: MIT
