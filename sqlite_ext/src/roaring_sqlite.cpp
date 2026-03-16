@@ -596,43 +596,43 @@ int sqlite3_roaring_init(sqlite3 *db, char **pzErrMsg, const sqlite3_api_routine
     (void)pzErrMsg;
 
     /* Aggregate: roaring_build(value) -> BLOB */
-    sqlite3_create_function(db, "roaring_build", 1, SQLITE_UTF8 | SQLITE_DETERMINISTIC,
+    sqlite3_create_function(db, "bf_build", 1, SQLITE_UTF8 | SQLITE_DETERMINISTIC,
                             nullptr, nullptr, sqlite_roaring_build_step, sqlite_roaring_build_final);
 
-    sqlite3_create_function(db, "roaring_build_json", 1, SQLITE_UTF8 | SQLITE_DETERMINISTIC,
+    sqlite3_create_function(db, "bf_build_json", 1, SQLITE_UTF8 | SQLITE_DETERMINISTIC,
                             nullptr, sqlite_roaring_build_json, nullptr, nullptr);
-    sqlite3_create_function(db, "roaring_cardinality", 1, SQLITE_UTF8 | SQLITE_DETERMINISTIC,
+    sqlite3_create_function(db, "bf_cardinality", 1, SQLITE_UTF8 | SQLITE_DETERMINISTIC,
                             nullptr, sqlite_roaring_cardinality, nullptr, nullptr);
-    sqlite3_create_function(db, "roaring_intersection_card", 2, SQLITE_UTF8 | SQLITE_DETERMINISTIC,
+    sqlite3_create_function(db, "bf_intersection_card", 2, SQLITE_UTF8 | SQLITE_DETERMINISTIC,
                             nullptr, sqlite_roaring_intersection_card, nullptr, nullptr);
-    sqlite3_create_function(db, "roaring_containment", 2, SQLITE_UTF8 | SQLITE_DETERMINISTIC,
+    sqlite3_create_function(db, "bf_containment", 2, SQLITE_UTF8 | SQLITE_DETERMINISTIC,
                             nullptr, sqlite_roaring_containment, nullptr, nullptr);
-    sqlite3_create_function(db, "roaring_jaccard", 2, SQLITE_UTF8 | SQLITE_DETERMINISTIC,
+    sqlite3_create_function(db, "bf_jaccard", 2, SQLITE_UTF8 | SQLITE_DETERMINISTIC,
                             nullptr, sqlite_roaring_jaccard, nullptr, nullptr);
-    sqlite3_create_function(db, "roaring_to_base64", 1, SQLITE_UTF8 | SQLITE_DETERMINISTIC,
+    sqlite3_create_function(db, "bf_to_base64", 1, SQLITE_UTF8 | SQLITE_DETERMINISTIC,
                             nullptr, sqlite_roaring_to_base64, nullptr, nullptr);
-    sqlite3_create_function(db, "roaring_from_base64", 1, SQLITE_UTF8 | SQLITE_DETERMINISTIC,
+    sqlite3_create_function(db, "bf_from_base64", 1, SQLITE_UTF8 | SQLITE_DETERMINISTIC,
                             nullptr, sqlite_roaring_from_base64, nullptr, nullptr);
-    sqlite3_create_function(db, "roaring_containment_json", 2, SQLITE_UTF8 | SQLITE_DETERMINISTIC,
+    sqlite3_create_function(db, "bf_containment_json", 2, SQLITE_UTF8 | SQLITE_DETERMINISTIC,
                             nullptr, sqlite_roaring_containment_json, nullptr, nullptr);
 
     /* Histogram aggregate: 2-arg (key, weight) — source-agnostic */
-    sqlite3_create_function(db, "roaring_build_histogram", 2, SQLITE_UTF8 | SQLITE_DETERMINISTIC,
+    sqlite3_create_function(db, "bf_build_histogram", 2, SQLITE_UTF8 | SQLITE_DETERMINISTIC,
                             nullptr, nullptr, sqlite_histogram_build_step_2, sqlite_histogram_build_final);
     /* Histogram aggregate: 5-arg (key, equal_rows, range_rows, distinct_range_rows, avg_range_rows) — SQL Server */
-    sqlite3_create_function(db, "roaring_build_histogram", 5, SQLITE_UTF8 | SQLITE_DETERMINISTIC,
+    sqlite3_create_function(db, "bf_build_histogram", 5, SQLITE_UTF8 | SQLITE_DETERMINISTIC,
                             nullptr, nullptr, sqlite_histogram_build_step_5, sqlite_histogram_build_final);
 
     /* Histogram scalar functions */
-    sqlite3_create_function(db, "roaring_histogram_set_shape", 2, SQLITE_UTF8 | SQLITE_DETERMINISTIC,
+    sqlite3_create_function(db, "bf_histogram_set_shape", 2, SQLITE_UTF8 | SQLITE_DETERMINISTIC,
                             nullptr, sqlite_histogram_set_shape, nullptr, nullptr);
-    sqlite3_create_function(db, "roaring_histogram_containment", 2, SQLITE_UTF8 | SQLITE_DETERMINISTIC,
+    sqlite3_create_function(db, "bf_histogram_containment", 2, SQLITE_UTF8 | SQLITE_DETERMINISTIC,
                             nullptr, sqlite_histogram_containment, nullptr, nullptr);
-    sqlite3_create_function(db, "roaring_histogram_bitmap", 1, SQLITE_UTF8 | SQLITE_DETERMINISTIC,
+    sqlite3_create_function(db, "bf_histogram_bitmap", 1, SQLITE_UTF8 | SQLITE_DETERMINISTIC,
                             nullptr, sqlite_histogram_bitmap, nullptr, nullptr);
-    sqlite3_create_function(db, "roaring_histogram_shape", 1, SQLITE_UTF8 | SQLITE_DETERMINISTIC,
+    sqlite3_create_function(db, "bf_histogram_shape", 1, SQLITE_UTF8 | SQLITE_DETERMINISTIC,
                             nullptr, sqlite_histogram_shape, nullptr, nullptr);
-    sqlite3_create_function(db, "roaring_histogram_similarity", 2, SQLITE_UTF8 | SQLITE_DETERMINISTIC,
+    sqlite3_create_function(db, "bf_histogram_similarity", 2, SQLITE_UTF8 | SQLITE_DETERMINISTIC,
                             nullptr, sqlite_histogram_similarity, nullptr, nullptr);
 
     return SQLITE_OK;

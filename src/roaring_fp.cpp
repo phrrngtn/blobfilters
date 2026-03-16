@@ -20,6 +20,8 @@
 
 using json = nlohmann::json;
 
+static thread_local std::string g_errmsg;
+
 /* ========================================================================
  * Opaque handle
  * ======================================================================== */
@@ -701,6 +703,10 @@ double rfp_histogram_shape_similarity(const rfp_histogram *a,
     double disc_diff = a->discreteness - b->discreteness;
 
     return std::sqrt(cr_diff * cr_diff + rep_diff * rep_diff + disc_diff * disc_diff);
+}
+
+const char *rfp_errmsg(void) {
+    return g_errmsg.c_str();
 }
 
 } /* extern "C" */

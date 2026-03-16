@@ -130,6 +130,9 @@ char *rfp_histogram_shape_json(const rfp_histogram *hf);
 double rfp_histogram_shape_similarity(const rfp_histogram *a,
                                       const rfp_histogram *b);
 
+/* Last error message (thread-local) */
+const char *rfp_errmsg(void);
+
 #ifdef __cplusplus
 }
 #endif

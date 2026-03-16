@@ -33,32 +33,46 @@ cmake --build build
 
 Available in both SQLite and DuckDB extensions:
 
+### Bitmap Functions
+
 | Function | Type | Description |
 |---|---|---|
-| `roaring_build(value)` | aggregate | Hash each value, build bitmap |
-| `roaring_build_json(json_array)` | scalar | Build bitmap from JSON array of strings |
-| `roaring_cardinality(blob)` | scalar | Number of elements in bitmap |
-| `roaring_intersection_card(a, b)` | scalar | \|A ∩ B\| |
-| `roaring_containment(probe, ref)` | scalar | \|probe ∩ ref\| / \|probe\| |
-| `roaring_jaccard(a, b)` | scalar | \|A ∩ B\| / \|A ∪ B\| |
-| `roaring_containment_json(json, ref)` | scalar | Build probe from JSON, return containment |
-| `roaring_to_base64(blob)` | scalar | Serialize bitmap to base64 text |
-| `roaring_from_base64(text)` | scalar | Deserialize bitmap from base64 |
+| `bf_build(value)` | aggregate | Hash each value, build bitmap |
+| `bf_build_json(json_array)` | scalar | Build bitmap from JSON array of strings |
+| `bf_cardinality(blob)` | scalar | Number of elements in bitmap |
+| `bf_intersection_card(a, b)` | scalar | \|A ∩ B\| |
+| `bf_containment(probe, ref)` | scalar | \|probe ∩ ref\| / \|probe\| |
+| `bf_jaccard(a, b)` | scalar | \|A ∩ B\| / \|A ∪ B\| |
+| `bf_containment_json(json, ref)` | scalar | Build probe from JSON, return containment |
+| `bf_to_base64(blob)` | scalar | Serialize bitmap to base64 text |
+| `bf_from_base64(text)` | scalar | Deserialize bitmap from base64 |
+
+### Histogram Functions
+
+| Function | Type | Description |
+|---|---|---|
+| `bf_build_histogram(key, weight)` | aggregate | Build histogram fingerprint (source-agnostic) |
+| `bf_build_histogram(key, eq, rng, drng, avg)` | aggregate | Build histogram from SQL Server stats |
+| `bf_histogram_set_shape(hist, shape)` | scalar | Merge shape metrics into histogram JSON |
+| `bf_histogram_containment(hist, domain)` | scalar | Weighted containment of histogram vs domain bitmap |
+| `bf_histogram_bitmap(hist)` | scalar | Extract raw bitmap from histogram JSON |
+| `bf_histogram_shape(hist)` | scalar | Extract shape metrics as JSON |
+| `bf_histogram_similarity(a, b)` | scalar | Euclidean distance between histogram shapes |
 
 ## Example: Domain Detection
 
 ```sql
 -- Build domain fingerprints
 INSERT INTO domain_fingerprints
-SELECT 'us_states', COUNT(*), roaring_build(state_name)
+SELECT 'us_states', COUNT(*), bf_build(state_name)
 FROM us_states;
 
 -- Probe a wild column against all domains
 WITH probe AS (
-    SELECT roaring_build(value) AS fp FROM wild_column
+    SELECT bf_build(value) AS fp FROM wild_column
 )
 SELECT d.domain_name,
-       roaring_containment(probe.fp, d.fingerprint) AS containment
+       bf_containment(probe.fp, d.fingerprint) AS containment
 FROM domain_fingerprints d, probe
 ORDER BY containment DESC;
 ```

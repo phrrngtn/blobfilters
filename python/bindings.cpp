@@ -93,20 +93,20 @@ private:
 /* Module-level factory functions */
 static RoaringFP from_blob(nb::bytes data) {
     rfp_bitmap *bm = rfp_deserialize(data.c_str(), data.size());
-    if (!bm) throw std::runtime_error("Failed to deserialize bitmap");
+    if (!bm) throw nb::value_error("Failed to deserialize bitmap");
     return RoaringFP(bm);
 }
 
 static RoaringFP from_base64(const std::string &b64) {
     rfp_bitmap *bm = rfp_from_base64(b64.data(), b64.size());
-    if (!bm) throw std::runtime_error("Failed to decode base64 bitmap");
+    if (!bm) throw nb::value_error("Failed to decode base64 bitmap");
     return RoaringFP(bm);
 }
 
 static RoaringFP from_json(const std::string &json_array) {
     RoaringFP fp;
     if (fp.add_json(json_array) != 0) {
-        throw std::runtime_error("Failed to parse JSON array");
+        throw nb::value_error("Failed to parse JSON array");
     }
     return fp;
 }
@@ -119,7 +119,7 @@ static std::string probe_json(const std::string &symbols_json, const std::vector
     }
     char *result = rfp_probe_json(symbols_json.data(), symbols_json.size(),
                                   raw_refs.data(), raw_refs.size());
-    if (!result) throw std::runtime_error("Failed to probe JSON");
+    if (!result) throw nb::value_error("Failed to probe JSON");
     std::string out(result);
     rfp_free_string(result);
     return out;

@@ -104,48 +104,45 @@ if(BUILD_SQLITE_EXTENSION)
 endif()
 
 #===--------------------------------------------------------------------===
-# DuckDB extension (optional — uses installed DuckDB, no submodules needed)
+# DuckDB C API headers (for extension build)
+#===--------------------------------------------------------------------===
+
+FetchContent_Declare(duckdb_capi
+    GIT_REPOSITORY https://github.com/duckdb/extension-template-c.git
+    GIT_TAG        main
+    GIT_SHALLOW    TRUE
+)
+FetchContent_Populate(duckdb_capi)
+set(DUCKDB_CAPI_INCLUDE "${duckdb_capi_SOURCE_DIR}/duckdb_capi")
+
+#===--------------------------------------------------------------------===
+# DuckDB extension (optional — pure C API, no DuckDB install needed)
 #===--------------------------------------------------------------------===
 
 option(BUILD_DUCKDB_EXTENSION "Build DuckDB loadable extension" OFF)
 if(BUILD_DUCKDB_EXTENSION)
-    find_package(DuckDB QUIET)
-    if(DuckDB_FOUND)
-        message(STATUS "DuckDB found via cmake config: ${DuckDB_INCLUDE_DIRS}")
-    else()
-        # Fall back to well-known paths
-        find_path(DuckDB_INCLUDE_DIRS duckdb.hpp
-            HINTS /opt/homebrew/include /usr/local/include)
-        find_library(DuckDB_LIBRARIES duckdb
-            HINTS /opt/homebrew/lib /usr/local/lib)
-
-        if(NOT DuckDB_INCLUDE_DIRS OR NOT DuckDB_LIBRARIES)
-            message(FATAL_ERROR "DuckDB not found. Install via: brew install duckdb")
-        endif()
-        message(STATUS "DuckDB found: ${DuckDB_INCLUDE_DIRS}, ${DuckDB_LIBRARIES}")
-    endif()
-
-    add_library(roaring_duckdb MODULE duckdb_ext/src/roaring_extension.cpp)
-    target_link_libraries(roaring_duckdb PRIVATE roaring_fp ${DuckDB_LIBRARIES})
-    target_include_directories(roaring_duckdb PRIVATE ${DuckDB_INCLUDE_DIRS})
-
+    add_library(roaring_duckdb MODULE duckdb_ext/src/roaring_duckdb.c)
+    target_link_libraries(roaring_duckdb PRIVATE roaring_fp)
     target_include_directories(roaring_duckdb PRIVATE
         ${CMAKE_SOURCE_DIR}/include
-        ${CMAKE_SOURCE_DIR}/duckdb_ext/src/include
+        ${DUCKDB_CAPI_INCLUDE}
     )
     set_target_properties(roaring_duckdb PROPERTIES
         PREFIX ""
-        OUTPUT_NAME "roaring"
-        SUFFIX ".duckdb_extension"
+        OUTPUT_NAME "blobfilters"
+        LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/duckdb"
     )
+    if(APPLE)
+        target_link_options(roaring_duckdb PRIVATE -undefined dynamic_lookup)
+    endif()
 
-    # Append DuckDB extension metadata footer after building
-    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    # Generate .duckdb_extension with metadata footer
+    find_program(PYTHON_EXE NAMES python3 python REQUIRED)
     add_custom_command(TARGET roaring_duckdb POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E echo "Appending DuckDB extension metadata..."
-        COMMAND Python3::Interpreter ${CMAKE_SOURCE_DIR}/scripts/append_duckdb_metadata.py
-            $<TARGET_FILE:roaring_duckdb>
-        VERBATIM
+        COMMAND ${PYTHON_EXE} "${CMAKE_SOURCE_DIR}/duckdb_ext/append_metadata.py"
+            "$<TARGET_FILE:roaring_duckdb>"
+            "$<TARGET_FILE_DIR:roaring_duckdb>/blobfilters.duckdb_extension"
+        COMMENT "Appending DuckDB extension metadata -> blobfilters.duckdb_extension"
     )
 endif()
 
