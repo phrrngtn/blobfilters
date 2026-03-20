@@ -8,6 +8,7 @@
 #include "roaring_fp.h"
 
 #include "roaring.h"
+#include "utf8proc.h"
 
 #include <nlohmann/json.hpp>
 
@@ -163,6 +164,45 @@ void rfp_add_hash(rfp_bitmap *bm, const void *data, size_t len) {
     }
 }
 
+/* ========================================================================
+ * Unicode normalization: NFKD + strip combining marks + casefold
+ * ======================================================================== */
+
+static std::string normalize_casefold(const void *data, size_t len) {
+    /* utf8proc_map with NFKD + casefold + strip ignorable marks */
+    utf8proc_uint8_t *result = nullptr;
+    utf8proc_ssize_t result_len = utf8proc_map(
+        static_cast<const utf8proc_uint8_t *>(data),
+        static_cast<utf8proc_ssize_t>(len),
+        &result,
+        static_cast<utf8proc_option_t>(
+            UTF8PROC_DECOMPOSE | UTF8PROC_COMPAT |
+            UTF8PROC_CASEFOLD | UTF8PROC_STRIPMARK
+        )
+    );
+    if (result_len < 0 || !result) {
+        /* Fallback: return input as-is */
+        free(result);
+        return std::string(static_cast<const char *>(data), len);
+    }
+    std::string normalized(reinterpret_cast<char *>(result),
+                           static_cast<size_t>(result_len));
+    free(result);
+    return normalized;
+}
+
+void rfp_add_hash_normalized(rfp_bitmap *bm, const void *data, size_t len,
+                              rfp_norm_mode mode) {
+    if (!bm || !bm->roaring || !data) return;
+
+    if (mode & RFP_NORM_CASEFOLD) {
+        std::string norm = normalize_casefold(data, len);
+        roaring_bitmap_add(bm->roaring, fnv1a(norm.data(), norm.size()));
+    } else {
+        roaring_bitmap_add(bm->roaring, fnv1a(data, len));
+    }
+}
+
 int rfp_add_json_array(rfp_bitmap *bm, const char *json_str, size_t json_len) {
     if (!bm || !bm->roaring || !json_str) return -1;
 
@@ -174,6 +214,27 @@ int rfp_add_json_array(rfp_bitmap *bm, const char *json_str, size_t json_len) {
             if (item.is_string()) {
                 std::string s = item.get<std::string>();
                 roaring_bitmap_add(bm->roaring, fnv1a(s.data(), s.size()));
+            }
+        }
+        return 0;
+    } catch (...) {
+        return -1;
+    }
+}
+
+int rfp_add_json_array_normalized(rfp_bitmap *bm, const char *json_str, size_t json_len,
+                                   rfp_norm_mode mode) {
+    if (!bm || !bm->roaring || !json_str) return -1;
+    if (mode == RFP_NORM_NONE) return rfp_add_json_array(bm, json_str, json_len);
+
+    try {
+        auto arr = json::parse(json_str, json_str + json_len);
+        if (!arr.is_array()) return -1;
+
+        for (const auto &item : arr) {
+            if (item.is_string()) {
+                std::string s = item.get<std::string>();
+                rfp_add_hash_normalized(bm, s.data(), s.size(), mode);
             }
         }
         return 0;
@@ -401,6 +462,25 @@ void rfp_histogram_add_value(rfp_histogram *hf,
     uint32_t hash = fnv1a(key, key_len);
     rfp_add_uint32(hf->bitmap, hash);
     hf->weights[hash] += weight;
+    hf->total_equal_rows += weight;
+    hf->steps++;
+}
+
+void rfp_histogram_add_value_normalized(rfp_histogram *hf,
+                                         const char *key, size_t key_len,
+                                         double weight, rfp_norm_mode mode) {
+    if (!hf || !key) return;
+
+    if (mode & RFP_NORM_CASEFOLD) {
+        std::string norm = normalize_casefold(key, key_len);
+        uint32_t hash = fnv1a(norm.data(), norm.size());
+        rfp_add_uint32(hf->bitmap, hash);
+        hf->weights[hash] += weight;
+    } else {
+        uint32_t hash = fnv1a(key, key_len);
+        rfp_add_uint32(hf->bitmap, hash);
+        hf->weights[hash] += weight;
+    }
     hf->total_equal_rows += weight;
     hf->steps++;
 }

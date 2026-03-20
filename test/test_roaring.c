@@ -420,6 +420,102 @@ int main(void) {
         rfp_histogram_free(b);
     }
 
+    printf("\n=== Test 18: Normalized hash — casefold ===\n");
+    {
+        rfp_bitmap *bm = rfp_create();
+
+        /* All three should hash to the same value after NFKD + casefold */
+        rfp_add_hash_normalized(bm, "California", 10, RFP_NORM_CASEFOLD);
+        rfp_add_hash_normalized(bm, "california", 10, RFP_NORM_CASEFOLD);
+        rfp_add_hash_normalized(bm, "CALIFORNIA", 10, RFP_NORM_CASEFOLD);
+        CHECK(rfp_cardinality(bm) == 1, "case variants produce single bitmap entry");
+
+        /* Raw hashing should produce distinct entries */
+        rfp_bitmap *raw = rfp_create();
+        rfp_add_hash(raw, "California", 10);
+        rfp_add_hash(raw, "california", 10);
+        rfp_add_hash(raw, "CALIFORNIA", 10);
+        CHECK(rfp_cardinality(raw) == 3, "raw hashing keeps case variants distinct");
+
+        rfp_free(bm);
+        rfp_free(raw);
+    }
+
+    printf("\n=== Test 19: Normalized hash — accented characters ===\n");
+    {
+        rfp_bitmap *bm = rfp_create();
+
+        /* José vs Jose — accent stripping via NFKD + STRIPMARK */
+        rfp_add_hash_normalized(bm, "Jos\xc3\xa9", 5, RFP_NORM_CASEFOLD);  /* José (UTF-8) */
+        rfp_add_hash_normalized(bm, "Jose", 4, RFP_NORM_CASEFOLD);
+        CHECK(rfp_cardinality(bm) == 1, "accented and unaccented merge");
+
+        /* Fullwidth characters — NFKD compatibility decomposition */
+        rfp_bitmap *fw = rfp_create();
+        rfp_add_hash_normalized(fw, "ABC", 3, RFP_NORM_CASEFOLD);
+        /* Ａ Ｂ Ｃ in UTF-8: each fullwidth char is 3 bytes */
+        rfp_add_hash_normalized(fw, "\xef\xbc\xa1\xef\xbc\xa2\xef\xbc\xa3", 9, RFP_NORM_CASEFOLD);
+        CHECK(rfp_cardinality(fw) == 1, "fullwidth and ASCII merge");
+
+        rfp_free(bm);
+        rfp_free(fw);
+    }
+
+    printf("\n=== Test 20: Normalized JSON array ===\n");
+    {
+        rfp_bitmap *norm_bm = rfp_create();
+        const char *json = "[\"California\",\"CALIFORNIA\",\"california\"]";
+        int rc = rfp_add_json_array_normalized(norm_bm, json, strlen(json), RFP_NORM_CASEFOLD);
+        CHECK(rc == 0, "rfp_add_json_array_normalized returns 0");
+        CHECK(rfp_cardinality(norm_bm) == 1, "JSON case variants merge to 1");
+
+        rfp_bitmap *raw_bm = rfp_create();
+        rc = rfp_add_json_array(raw_bm, json, strlen(json));
+        CHECK(rc == 0, "rfp_add_json_array returns 0");
+        CHECK(rfp_cardinality(raw_bm) == 3, "JSON raw keeps 3 distinct");
+
+        rfp_free(norm_bm);
+        rfp_free(raw_bm);
+    }
+
+    printf("\n=== Test 21: Normalized histogram add_value ===\n");
+    {
+        rfp_histogram *hf = rfp_histogram_create();
+
+        /* Add same state in different cases — should merge into one hash */
+        rfp_histogram_add_value_normalized(hf, "CA", 2, 100, RFP_NORM_CASEFOLD);
+        rfp_histogram_add_value_normalized(hf, "ca", 2, 50, RFP_NORM_CASEFOLD);
+        rfp_histogram_add_value_normalized(hf, "Ca", 2, 25, RFP_NORM_CASEFOLD);
+
+        const rfp_bitmap *bm = rfp_histogram_bitmap(hf);
+        CHECK(rfp_cardinality(bm) == 1, "normalized histogram: case variants merge");
+
+        /* Build a domain with the normalized form */
+        rfp_bitmap *domain = rfp_create();
+        rfp_add_hash_normalized(domain, "CA", 2, RFP_NORM_CASEFOLD);
+
+        /* Weighted containment: all weight should match since all forms → same hash */
+        double wc = rfp_histogram_weighted_containment(hf, domain);
+        CHECK_CLOSE(wc, 1.0, 0.001, "normalized histogram: full weighted containment");
+
+        rfp_free(domain);
+        rfp_histogram_free(hf);
+    }
+
+    printf("\n=== Test 22: NORM_NONE passes through unchanged ===\n");
+    {
+        rfp_bitmap *bm_none = rfp_create();
+        rfp_bitmap *bm_raw = rfp_create();
+
+        rfp_add_hash_normalized(bm_none, "Hello", 5, RFP_NORM_NONE);
+        rfp_add_hash(bm_raw, "Hello", 5);
+
+        CHECK(rfp_intersection_card(bm_none, bm_raw) == 1, "NORM_NONE matches raw hash");
+
+        rfp_free(bm_none);
+        rfp_free(bm_raw);
+    }
+
     printf("\n=== Results: %d/%d tests passed ===\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;
 }

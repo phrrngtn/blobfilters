@@ -10,8 +10,8 @@ target_include_directories(roaring_fp PUBLIC
     ${CMAKE_SOURCE_DIR}/third_party/roaring
 )
 
-# nlohmann/json is fetched by the root CMakeLists.txt
-target_link_libraries(roaring_fp PUBLIC nlohmann_json::nlohmann_json)
+# nlohmann/json and utf8proc are fetched by the root CMakeLists.txt
+target_link_libraries(roaring_fp PUBLIC nlohmann_json::nlohmann_json utf8proc)
 
 set_target_properties(roaring_fp PROPERTIES
     C_STANDARD 11

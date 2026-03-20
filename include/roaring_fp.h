@@ -18,6 +18,12 @@ extern "C" {
 /* Opaque handle */
 typedef struct rfp_bitmap rfp_bitmap;
 
+/* Normalization modes (composable via bitwise OR) */
+typedef enum {
+    RFP_NORM_NONE     = 0,
+    RFP_NORM_CASEFOLD = 1  /* NFKD + strip combining marks + casefold */
+} rfp_norm_mode;
+
 /* Lifecycle */
 rfp_bitmap *rfp_create(void);
 rfp_bitmap *rfp_copy(const rfp_bitmap *bm);
@@ -27,9 +33,18 @@ void        rfp_free(rfp_bitmap *bm);
 void rfp_add_uint32(rfp_bitmap *bm, uint32_t val);
 void rfp_add_hash(rfp_bitmap *bm, const void *data, size_t len);  /* FNV-1a -> add */
 
+/* Normalized hash: applies normalization before FNV-1a hashing.
+ * RFP_NORM_CASEFOLD: NFKD decomposition, strip combining marks, casefold. */
+void rfp_add_hash_normalized(rfp_bitmap *bm, const void *data, size_t len,
+                              rfp_norm_mode mode);
+
 /* Build from JSON array of strings: ["foo","bar","baz"]
  * Hashes each string and adds to bitmap. Returns 0 on success, -1 on parse error. */
 int rfp_add_json_array(rfp_bitmap *bm, const char *json, size_t json_len);
+
+/* Like rfp_add_json_array but applies normalization before hashing. */
+int rfp_add_json_array_normalized(rfp_bitmap *bm, const char *json, size_t json_len,
+                                   rfp_norm_mode mode);
 
 /* Serialization (portable binary format for database BLOB storage) */
 size_t rfp_serialized_size(const rfp_bitmap *bm);
@@ -76,6 +91,11 @@ void           rfp_histogram_free(rfp_histogram *hf);
 void rfp_histogram_add_value(rfp_histogram *hf,
                              const char *key, size_t key_len,
                              double weight);
+
+/* Like rfp_histogram_add_value but applies normalization before hashing. */
+void rfp_histogram_add_value_normalized(rfp_histogram *hf,
+                                         const char *key, size_t key_len,
+                                         double weight, rfp_norm_mode mode);
 
 /* Add a SQL Server histogram step (5-column convenience wrapper).
  * Accumulates range_rows/distinct_range_rows for shape computation. */

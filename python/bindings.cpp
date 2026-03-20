@@ -42,12 +42,21 @@ public:
         rfp_add_hash(bm_, s.data(), s.size());
     }
 
+    void add_normalized(const std::string &s, int mode) {
+        rfp_add_hash_normalized(bm_, s.data(), s.size(), static_cast<rfp_norm_mode>(mode));
+    }
+
     void add_uint32(uint32_t val) {
         rfp_add_uint32(bm_, val);
     }
 
     int add_json(const std::string &json_array) {
         return rfp_add_json_array(bm_, json_array.data(), json_array.size());
+    }
+
+    int add_json_normalized(const std::string &json_array, int mode) {
+        return rfp_add_json_array_normalized(bm_, json_array.data(), json_array.size(),
+                                              static_cast<rfp_norm_mode>(mode));
     }
 
     uint64_t cardinality() const {
@@ -131,8 +140,10 @@ NB_MODULE(_core, m) {
     nb::class_<RoaringFP>(m, "RoaringFP")
         .def(nb::init<>())
         .def("add", &RoaringFP::add, "Add a string (hashed via FNV-1a)")
+        .def("add_normalized", &RoaringFP::add_normalized, "Add a string with normalization (NFKD + casefold)")
         .def("add_uint32", &RoaringFP::add_uint32, "Add a raw uint32 value")
         .def("add_json", &RoaringFP::add_json, "Add strings from a JSON array")
+        .def("add_json_normalized", &RoaringFP::add_json_normalized, "Add strings from JSON array with normalization")
         .def("cardinality", &RoaringFP::cardinality, "Number of elements")
         .def("serialize", &RoaringFP::serialize, "Serialize to bytes (portable format)")
         .def("to_base64", &RoaringFP::to_base64, "Serialize to base64 string")
@@ -144,6 +155,9 @@ NB_MODULE(_core, m) {
         .def("__repr__", [](const RoaringFP &fp) {
             return "RoaringFP(cardinality=" + std::to_string(fp.cardinality()) + ")";
         });
+
+    m.attr("NORM_NONE") = static_cast<int>(RFP_NORM_NONE);
+    m.attr("NORM_CASEFOLD") = static_cast<int>(RFP_NORM_CASEFOLD);
 
     m.def("from_blob", &from_blob, "Deserialize a bitmap from bytes");
     m.def("from_base64", &from_base64, "Deserialize a bitmap from base64 string");

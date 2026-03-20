@@ -27,6 +27,21 @@ set(JSON_BuildTests OFF CACHE INTERNAL "")
 FetchContent_MakeAvailable(nlohmann_json)
 
 #===--------------------------------------------------------------------===
+# utf8proc (Unicode normalization)
+#===--------------------------------------------------------------------===
+
+FetchContent_Declare(
+    utf8proc
+    GIT_REPOSITORY https://github.com/JuliaStrings/utf8proc.git
+    GIT_TAG        v2.9.0
+    GIT_SHALLOW    TRUE
+)
+set(UTF8PROC_INSTALL OFF CACHE INTERNAL "")
+set(CMAKE_POLICY_VERSION_MINIMUM 3.5 CACHE STRING "" FORCE)
+FetchContent_MakeAvailable(utf8proc)
+unset(CMAKE_POLICY_VERSION_MINIMUM CACHE)
+
+#===--------------------------------------------------------------------===
 # Core library (always built)
 #===--------------------------------------------------------------------===
 

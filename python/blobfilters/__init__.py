@@ -6,6 +6,8 @@ from blobfilters._core import (
     from_base64,
     from_json,
     probe_json,
+    NORM_NONE,
+    NORM_CASEFOLD,
 )
 
 __all__ = [
@@ -14,4 +16,6 @@ __all__ = [
     "from_base64",
     "from_json",
     "probe_json",
+    "NORM_NONE",
+    "NORM_CASEFOLD",
 ]
