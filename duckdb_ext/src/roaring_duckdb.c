@@ -92,6 +92,35 @@ static void bf_build_json_func(duckdb_function_info info,
     }
 }
 
+/* ── bf_build_json_normalized(json_array VARCHAR) -> BLOB ─────────
+   NFKD decompose + strip combining marks + casefold before hashing.
+   Build and probe must both use this function for matching to work. */
+
+static void bf_build_json_normalized_func(duckdb_function_info info,
+                                          duckdb_data_chunk input,
+                                          duckdb_vector output) {
+    idx_t size = duckdb_data_chunk_get_size(input);
+    duckdb_vector vec0 = duckdb_data_chunk_get_vector(input, 0);
+    duckdb_string_t *data0 = (duckdb_string_t *)duckdb_vector_get_data(vec0);
+    uint64_t *val0 = duckdb_vector_get_validity(vec0);
+
+    for (idx_t row = 0; row < size; row++) {
+        CHECK_NULL_1(row);
+        uint32_t len;
+        const char *json = str_ptr(&data0[row], &len);
+
+        rfp_bitmap *bm = rfp_create();
+        rfp_add_json_array_normalized(bm, json, len, RFP_NORM_CASEFOLD);
+        size_t sz = rfp_serialized_size(bm);
+        char *buf = (char *)malloc(sz);
+        rfp_serialize(bm, buf, sz);
+        rfp_free(bm);
+
+        duckdb_vector_assign_string_element_len(output, row, buf, sz);
+        free(buf);
+    }
+}
+
 /* ── bf_cardinality(blob BLOB) -> UBIGINT ────────────────────────── */
 
 static void bf_cardinality_func(duckdb_function_info info,
@@ -303,6 +332,47 @@ static void bf_containment_json_func(duckdb_function_info info,
 
         rfp_bitmap *probe = rfp_create();
         if (rfp_add_json_array(probe, json, json_len) != 0) {
+            rfp_free(probe);
+            result_data[row] = 0.0;
+            continue;
+        }
+        rfp_bitmap *ref = rfp_deserialize(ref_blob, ref_len);
+        if (!ref) {
+            rfp_free(probe);
+            result_data[row] = 0.0;
+            continue;
+        }
+        result_data[row] = rfp_containment(probe, ref);
+        rfp_free(probe);
+        rfp_free(ref);
+    }
+}
+
+/* ── bf_containment_json_normalized(json VARCHAR, ref BLOB) -> DOUBLE
+   Probe with NFKD + casefold normalization.  The ref bitmap must have
+   been built with bf_build_json_normalized for hashes to match. ────── */
+
+static void bf_containment_json_normalized_func(duckdb_function_info info,
+                                                duckdb_data_chunk input,
+                                                duckdb_vector output) {
+    idx_t size = duckdb_data_chunk_get_size(input);
+    duckdb_vector vec0 = duckdb_data_chunk_get_vector(input, 0);
+    duckdb_vector vec1 = duckdb_data_chunk_get_vector(input, 1);
+    duckdb_string_t *data0 = (duckdb_string_t *)duckdb_vector_get_data(vec0);
+    duckdb_string_t *data1 = (duckdb_string_t *)duckdb_vector_get_data(vec1);
+    uint64_t *val0 = duckdb_vector_get_validity(vec0);
+    uint64_t *val1 = duckdb_vector_get_validity(vec1);
+    double *result_data = (double *)duckdb_vector_get_data(output);
+
+    for (idx_t row = 0; row < size; row++) {
+        CHECK_NULL_2(row);
+        uint32_t json_len, ref_len;
+        const char *json = str_ptr(&data0[row], &json_len);
+        const char *ref_blob = str_ptr(&data1[row], &ref_len);
+
+        rfp_bitmap *probe = rfp_create();
+        if (rfp_add_json_array_normalized(probe, json, json_len,
+                                          RFP_NORM_CASEFOLD) != 0) {
             rfp_free(probe);
             result_data[row] = 0.0;
             continue;
@@ -593,6 +663,29 @@ static void register_functions(duckdb_connection connection) {
         duckdb_scalar_function_add_parameter(f, blob_type);
         duckdb_scalar_function_set_return_type(f, double_type);
         duckdb_scalar_function_set_function(f, bf_containment_json_func);
+        duckdb_register_scalar_function(connection, f);
+        duckdb_destroy_scalar_function(&f);
+    }
+
+    /* bf_build_json_normalized(json VARCHAR) -> BLOB */
+    {
+        duckdb_scalar_function f = duckdb_create_scalar_function();
+        duckdb_scalar_function_set_name(f, "bf_build_json_normalized");
+        duckdb_scalar_function_add_parameter(f, varchar_type);
+        duckdb_scalar_function_set_return_type(f, blob_type);
+        duckdb_scalar_function_set_function(f, bf_build_json_normalized_func);
+        duckdb_register_scalar_function(connection, f);
+        duckdb_destroy_scalar_function(&f);
+    }
+
+    /* bf_containment_json_normalized(json VARCHAR, ref BLOB) -> DOUBLE */
+    {
+        duckdb_scalar_function f = duckdb_create_scalar_function();
+        duckdb_scalar_function_set_name(f, "bf_containment_json_normalized");
+        duckdb_scalar_function_add_parameter(f, varchar_type);
+        duckdb_scalar_function_add_parameter(f, blob_type);
+        duckdb_scalar_function_set_return_type(f, double_type);
+        duckdb_scalar_function_set_function(f, bf_containment_json_normalized_func);
         duckdb_register_scalar_function(connection, f);
         duckdb_destroy_scalar_function(&f);
     }
