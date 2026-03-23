@@ -192,6 +192,7 @@ static void bf_containment_func(duckdb_function_info info,
     duckdb_string_t *data0 = (duckdb_string_t *)duckdb_vector_get_data(vec0);
     duckdb_string_t *data1 = (duckdb_string_t *)duckdb_vector_get_data(vec1);
     uint64_t *val0 = duckdb_vector_get_validity(vec0);
+    /* Note: both args vary in this function, so no ref caching. */
     uint64_t *val1 = duckdb_vector_get_validity(vec1);
     double *result_data = (double *)duckdb_vector_get_data(output);
 
@@ -310,6 +311,39 @@ static void bf_from_base64_func(duckdb_function_info info,
     }
 }
 
+/* ── Shared containment implementation with ref bitmap caching ──────
+   In a CROSS JOIN (cells × domains), the ref bitmap (arg 2) is constant
+   across all rows in a chunk for a given domain.  Deserializing the same
+   50KB bitmap 2048 times per chunk is pure waste.
+
+   Fix: cache the last deserialized ref bitmap and its source pointer.
+   If the next row's ref BLOB has the same data pointer, reuse it.
+   DuckDB's string storage guarantees pointer stability within a chunk
+   for non-inlined strings (> 12 bytes), so pointer comparison is safe.
+
+   Also provides a single-string probe path (rfp_add_hash / _normalized)
+   that avoids JSON array parsing overhead for the common case of
+   probing one value at a time. The JSON path is used as fallback when
+   the input contains JSON array syntax. */
+
+typedef struct {
+    const char *ref_ptr;   /* pointer to last ref blob data */
+    uint32_t    ref_len;   /* length of last ref blob */
+    rfp_bitmap *ref_bm;    /* deserialized bitmap (owned) */
+} RefCache;
+
+static rfp_bitmap *get_ref_cached(RefCache *cache,
+                                   const char *blob, uint32_t len) {
+    if (cache->ref_bm && cache->ref_len == len && cache->ref_ptr == blob)
+        return cache->ref_bm;
+
+    if (cache->ref_bm) rfp_free(cache->ref_bm);
+    cache->ref_ptr = blob;
+    cache->ref_len = len;
+    cache->ref_bm  = rfp_deserialize(blob, len);
+    return cache->ref_bm;
+}
+
 /* ── bf_containment_json(json VARCHAR, ref BLOB) -> DOUBLE ───────── */
 
 static void bf_containment_json_func(duckdb_function_info info,
@@ -323,6 +357,7 @@ static void bf_containment_json_func(duckdb_function_info info,
     uint64_t *val0 = duckdb_vector_get_validity(vec0);
     uint64_t *val1 = duckdb_vector_get_validity(vec1);
     double *result_data = (double *)duckdb_vector_get_data(output);
+    RefCache cache = {NULL, 0, NULL};
 
     for (idx_t row = 0; row < size; row++) {
         CHECK_NULL_2(row);
@@ -330,27 +365,27 @@ static void bf_containment_json_func(duckdb_function_info info,
         const char *json = str_ptr(&data0[row], &json_len);
         const char *ref_blob = str_ptr(&data1[row], &ref_len);
 
+        rfp_bitmap *ref = get_ref_cached(&cache, ref_blob, ref_len);
+        if (!ref) { result_data[row] = 0.0; continue; }
+
         rfp_bitmap *probe = rfp_create();
-        if (rfp_add_json_array(probe, json, json_len) != 0) {
-            rfp_free(probe);
-            result_data[row] = 0.0;
-            continue;
-        }
-        rfp_bitmap *ref = rfp_deserialize(ref_blob, ref_len);
-        if (!ref) {
+        /* Fast path: single value (no [ prefix) → hash directly */
+        if (json_len > 0 && json[0] != '[') {
+            rfp_add_hash(probe, json, json_len);
+        } else if (rfp_add_json_array(probe, json, json_len) != 0) {
             rfp_free(probe);
             result_data[row] = 0.0;
             continue;
         }
         result_data[row] = rfp_containment(probe, ref);
         rfp_free(probe);
-        rfp_free(ref);
     }
+    if (cache.ref_bm) rfp_free(cache.ref_bm);
 }
 
 /* ── bf_containment_json_normalized(json VARCHAR, ref BLOB) -> DOUBLE
-   Probe with NFKD + casefold normalization.  The ref bitmap must have
-   been built with bf_build_json_normalized for hashes to match. ────── */
+   Same as above but with NFKD + casefold normalization.  Both build
+   and probe must use normalized functions for hashes to match. ────── */
 
 static void bf_containment_json_normalized_func(duckdb_function_info info,
                                                 duckdb_data_chunk input,
@@ -363,6 +398,7 @@ static void bf_containment_json_normalized_func(duckdb_function_info info,
     uint64_t *val0 = duckdb_vector_get_validity(vec0);
     uint64_t *val1 = duckdb_vector_get_validity(vec1);
     double *result_data = (double *)duckdb_vector_get_data(output);
+    RefCache cache = {NULL, 0, NULL};
 
     for (idx_t row = 0; row < size; row++) {
         CHECK_NULL_2(row);
@@ -370,23 +406,23 @@ static void bf_containment_json_normalized_func(duckdb_function_info info,
         const char *json = str_ptr(&data0[row], &json_len);
         const char *ref_blob = str_ptr(&data1[row], &ref_len);
 
+        rfp_bitmap *ref = get_ref_cached(&cache, ref_blob, ref_len);
+        if (!ref) { result_data[row] = 0.0; continue; }
+
         rfp_bitmap *probe = rfp_create();
-        if (rfp_add_json_array_normalized(probe, json, json_len,
-                                          RFP_NORM_CASEFOLD) != 0) {
-            rfp_free(probe);
-            result_data[row] = 0.0;
-            continue;
-        }
-        rfp_bitmap *ref = rfp_deserialize(ref_blob, ref_len);
-        if (!ref) {
+        /* Fast path: single value → normalized hash directly */
+        if (json_len > 0 && json[0] != '[') {
+            rfp_add_hash_normalized(probe, json, json_len, RFP_NORM_CASEFOLD);
+        } else if (rfp_add_json_array_normalized(probe, json, json_len,
+                                                  RFP_NORM_CASEFOLD) != 0) {
             rfp_free(probe);
             result_data[row] = 0.0;
             continue;
         }
         result_data[row] = rfp_containment(probe, ref);
         rfp_free(probe);
-        rfp_free(ref);
     }
+    if (cache.ref_bm) rfp_free(cache.ref_bm);
 }
 
 /* ── bf_histogram_set_shape(hist VARCHAR, shape VARCHAR) -> VARCHAR ── */
