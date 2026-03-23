@@ -123,23 +123,116 @@ static void sqlite_roaring_build_json(sqlite3_context *ctx, int argc, sqlite3_va
  * roaring_cardinality(blob BLOB) -> INTEGER
  * ======================================================================== */
 
+/* ── auxdata helpers for caching deserialized bitmaps/histograms ──────
+
+   sqlite3_set_auxdata caches a pointer keyed by argument index.  SQLite
+   automatically calls the destructor when the argument value changes or
+   the statement is reset.  This gives us the same semantics as the
+   DuckDB ref-cache but driven by the host rather than by pointer comparison.
+
+   OWNERSHIP CONTRACT:
+   -------------------
+   These helpers return a pointer and set *owned to indicate who frees it:
+
+     *owned == false  →  auxdata owns the pointer.  DO NOT free it.
+                         It will be freed automatically when SQLite
+                         evicts the auxdata (argument changes or
+                         statement finalizes).
+
+     *owned == true   →  caller owns the pointer.  MUST free it after
+                         use.  This happens when sqlite3_set_auxdata
+                         failed to retain the pointer (e.g., memory
+                         pressure caused immediate eviction).
+
+   The pattern in every calling function is:
+     bool owned;
+     rfp_bitmap *bm = get_cached_bitmap(ctx, arg_idx, argv, &owned);
+     // ... use bm (read-only!) ...
+     if (owned) rfp_free(bm);
+
+   IMPORTANT: cached objects must be treated as READ-ONLY.  If a function
+   needs to mutate the deserialized object (e.g., histogram_set_shape),
+   it must NOT use the cache — deserialize a fresh copy instead.
+   Mutating a cached object corrupts it for subsequent calls. */
+
+static rfp_bitmap *get_cached_bitmap(sqlite3_context *ctx, int arg_idx,
+                                      sqlite3_value **argv, bool *owned) {
+    /* Try the cache first */
+    rfp_bitmap *bm = static_cast<rfp_bitmap *>(sqlite3_get_auxdata(ctx, arg_idx));
+    if (bm) {
+        *owned = false;
+        return bm;
+    }
+
+    /* Cache miss — deserialize */
+    const char *data = static_cast<const char *>(sqlite3_value_blob(argv[arg_idx]));
+    int len = sqlite3_value_bytes(argv[arg_idx]);
+    bm = rfp_deserialize(data, static_cast<size_t>(len));
+    if (!bm) {
+        *owned = false;
+        return nullptr;
+    }
+
+    /* Try to stash in auxdata */
+    sqlite3_set_auxdata(ctx, arg_idx, bm, reinterpret_cast<void(*)(void*)>(rfp_free));
+
+    /* Re-fetch: if SQLite kept it, we get it back and must not free.
+       If SQLite evicted it (e.g., malloc failed), it's already freed
+       and we need to deserialize again for this one call. */
+    rfp_bitmap *cached = static_cast<rfp_bitmap *>(sqlite3_get_auxdata(ctx, arg_idx));
+    if (cached) {
+        *owned = false;
+        return cached;
+    }
+
+    /* Evicted — re-deserialize, caller must free */
+    bm = rfp_deserialize(data, static_cast<size_t>(len));
+    *owned = true;
+    return bm;
+}
+
+static rfp_histogram *get_cached_histogram(sqlite3_context *ctx, int arg_idx,
+                                            sqlite3_value **argv, bool *owned) {
+    rfp_histogram *hf = static_cast<rfp_histogram *>(sqlite3_get_auxdata(ctx, arg_idx));
+    if (hf) {
+        *owned = false;
+        return hf;
+    }
+
+    const char *json = reinterpret_cast<const char *>(sqlite3_value_text(argv[arg_idx]));
+    int len = sqlite3_value_bytes(argv[arg_idx]);
+    hf = rfp_histogram_from_json(json, static_cast<size_t>(len));
+    if (!hf) {
+        *owned = false;
+        return nullptr;
+    }
+
+    sqlite3_set_auxdata(ctx, arg_idx, hf, reinterpret_cast<void(*)(void*)>(rfp_histogram_free));
+    rfp_histogram *cached = static_cast<rfp_histogram *>(sqlite3_get_auxdata(ctx, arg_idx));
+    if (cached) {
+        *owned = false;
+        return cached;
+    }
+
+    hf = rfp_histogram_from_json(json, static_cast<size_t>(len));
+    *owned = true;
+    return hf;
+}
+
+/* ======================================================================== */
+
 static void sqlite_roaring_cardinality(sqlite3_context *ctx, int argc, sqlite3_value **argv) {
     if (argc != 1 || sqlite3_value_type(argv[0]) == SQLITE_NULL) {
         sqlite3_result_null(ctx);
         return;
     }
 
-    const char *data = static_cast<const char *>(sqlite3_value_blob(argv[0]));
-    int len = sqlite3_value_bytes(argv[0]);
-
-    rfp_bitmap *bm = rfp_deserialize(data, static_cast<size_t>(len));
-    if (!bm) {
-        sqlite3_result_int64(ctx, 0);
-        return;
-    }
+    bool owned;
+    rfp_bitmap *bm = get_cached_bitmap(ctx, 0, argv, &owned);
+    if (!bm) { sqlite3_result_int64(ctx, 0); return; }
 
     sqlite3_result_int64(ctx, static_cast<sqlite3_int64>(rfp_cardinality(bm)));
-    rfp_free(bm);
+    if (owned) rfp_free(bm);
 }
 
 /* ========================================================================
@@ -152,23 +245,20 @@ static void sqlite_roaring_intersection_card(sqlite3_context *ctx, int argc, sql
         return;
     }
 
-    rfp_bitmap *a = rfp_deserialize(
-        static_cast<const char *>(sqlite3_value_blob(argv[0])),
-        static_cast<size_t>(sqlite3_value_bytes(argv[0])));
-    rfp_bitmap *b = rfp_deserialize(
-        static_cast<const char *>(sqlite3_value_blob(argv[1])),
-        static_cast<size_t>(sqlite3_value_bytes(argv[1])));
+    bool owned_a, owned_b;
+    rfp_bitmap *a = get_cached_bitmap(ctx, 0, argv, &owned_a);
+    rfp_bitmap *b = get_cached_bitmap(ctx, 1, argv, &owned_b);
 
     if (!a || !b) {
-        rfp_free(a);
-        rfp_free(b);
+        if (a && owned_a) rfp_free(a);
+        if (b && owned_b) rfp_free(b);
         sqlite3_result_int64(ctx, 0);
         return;
     }
 
     sqlite3_result_int64(ctx, static_cast<sqlite3_int64>(rfp_intersection_card(a, b)));
-    rfp_free(a);
-    rfp_free(b);
+    if (owned_a) rfp_free(a);
+    if (owned_b) rfp_free(b);
 }
 
 /* ========================================================================
@@ -181,23 +271,20 @@ static void sqlite_roaring_containment(sqlite3_context *ctx, int argc, sqlite3_v
         return;
     }
 
-    rfp_bitmap *probe = rfp_deserialize(
-        static_cast<const char *>(sqlite3_value_blob(argv[0])),
-        static_cast<size_t>(sqlite3_value_bytes(argv[0])));
-    rfp_bitmap *ref = rfp_deserialize(
-        static_cast<const char *>(sqlite3_value_blob(argv[1])),
-        static_cast<size_t>(sqlite3_value_bytes(argv[1])));
+    bool owned_probe, owned_ref;
+    rfp_bitmap *probe = get_cached_bitmap(ctx, 0, argv, &owned_probe);
+    rfp_bitmap *ref   = get_cached_bitmap(ctx, 1, argv, &owned_ref);
 
     if (!probe || !ref) {
-        rfp_free(probe);
-        rfp_free(ref);
+        if (probe && owned_probe) rfp_free(probe);
+        if (ref && owned_ref) rfp_free(ref);
         sqlite3_result_double(ctx, 0.0);
         return;
     }
 
     sqlite3_result_double(ctx, rfp_containment(probe, ref));
-    rfp_free(probe);
-    rfp_free(ref);
+    if (owned_probe) rfp_free(probe);
+    if (owned_ref) rfp_free(ref);
 }
 
 /* ========================================================================
@@ -210,23 +297,20 @@ static void sqlite_roaring_jaccard(sqlite3_context *ctx, int argc, sqlite3_value
         return;
     }
 
-    rfp_bitmap *a = rfp_deserialize(
-        static_cast<const char *>(sqlite3_value_blob(argv[0])),
-        static_cast<size_t>(sqlite3_value_bytes(argv[0])));
-    rfp_bitmap *b = rfp_deserialize(
-        static_cast<const char *>(sqlite3_value_blob(argv[1])),
-        static_cast<size_t>(sqlite3_value_bytes(argv[1])));
+    bool owned_a, owned_b;
+    rfp_bitmap *a = get_cached_bitmap(ctx, 0, argv, &owned_a);
+    rfp_bitmap *b = get_cached_bitmap(ctx, 1, argv, &owned_b);
 
     if (!a || !b) {
-        rfp_free(a);
-        rfp_free(b);
+        if (a && owned_a) rfp_free(a);
+        if (b && owned_b) rfp_free(b);
         sqlite3_result_double(ctx, 0.0);
         return;
     }
 
     sqlite3_result_double(ctx, rfp_jaccard(a, b));
-    rfp_free(a);
-    rfp_free(b);
+    if (owned_a) rfp_free(a);
+    if (owned_b) rfp_free(b);
 }
 
 /* ========================================================================
@@ -239,9 +323,8 @@ static void sqlite_roaring_to_base64(sqlite3_context *ctx, int argc, sqlite3_val
         return;
     }
 
-    rfp_bitmap *bm = rfp_deserialize(
-        static_cast<const char *>(sqlite3_value_blob(argv[0])),
-        static_cast<size_t>(sqlite3_value_bytes(argv[0])));
+    bool owned;
+    rfp_bitmap *bm = get_cached_bitmap(ctx, 0, argv, &owned);
     if (!bm) {
         sqlite3_result_null(ctx);
         return;
@@ -250,13 +333,13 @@ static void sqlite_roaring_to_base64(sqlite3_context *ctx, int argc, sqlite3_val
     size_t b64_size = rfp_base64_size(bm);
     char *buf = static_cast<char *>(sqlite3_malloc64(static_cast<sqlite3_int64>(b64_size + 1)));
     if (!buf) {
-        rfp_free(bm);
+        if (owned) rfp_free(bm);
         sqlite3_result_error_nomem(ctx);
         return;
     }
     rfp_to_base64(bm, buf, b64_size);
     buf[b64_size] = '\0';
-    rfp_free(bm);
+    if (owned) rfp_free(bm);
 
     sqlite3_result_text(ctx, buf, static_cast<int>(b64_size), sqlite3_free);
 }
@@ -314,9 +397,8 @@ static void sqlite_roaring_containment_json(sqlite3_context *ctx, int argc, sqli
         return;
     }
 
-    rfp_bitmap *ref = rfp_deserialize(
-        static_cast<const char *>(sqlite3_value_blob(argv[1])),
-        static_cast<size_t>(sqlite3_value_bytes(argv[1])));
+    bool owned_ref;
+    rfp_bitmap *ref = get_cached_bitmap(ctx, 1, argv, &owned_ref);
     if (!ref) {
         rfp_free(probe);
         sqlite3_result_double(ctx, 0.0);
@@ -325,7 +407,7 @@ static void sqlite_roaring_containment_json(sqlite3_context *ctx, int argc, sqli
 
     sqlite3_result_double(ctx, rfp_containment(probe, ref));
     rfp_free(probe);
-    rfp_free(ref);
+    if (owned_ref) rfp_free(ref);
 }
 
 /* ========================================================================
@@ -416,10 +498,15 @@ static void sqlite_histogram_set_shape(sqlite3_context *ctx, int argc, sqlite3_v
         return;
     }
 
-    const char *hist_json = reinterpret_cast<const char *>(sqlite3_value_text(argv[0]));
-    int hist_len = sqlite3_value_bytes(argv[0]);
     const char *shape_json = reinterpret_cast<const char *>(sqlite3_value_text(argv[1]));
     int shape_len = sqlite3_value_bytes(argv[1]);
+
+    /* Note: we DON'T cache arg[0] here because set_shape mutates the
+       histogram.  If it were cached, the mutation would corrupt the
+       auxdata for subsequent calls with the same input.  Mutation and
+       caching are incompatible — only cache read-only operations. */
+    const char *hist_json = reinterpret_cast<const char *>(sqlite3_value_text(argv[0]));
+    int hist_len = sqlite3_value_bytes(argv[0]);
 
     rfp_histogram *hf = rfp_histogram_from_json(hist_json, static_cast<size_t>(hist_len));
     if (!hf) {
@@ -449,27 +536,23 @@ static void sqlite_histogram_containment(sqlite3_context *ctx, int argc, sqlite3
         return;
     }
 
-    const char *json = reinterpret_cast<const char *>(sqlite3_value_text(argv[0]));
-    int json_len = sqlite3_value_bytes(argv[0]);
-
-    rfp_histogram *hf = rfp_histogram_from_json(json, static_cast<size_t>(json_len));
+    bool owned_hf, owned_domain;
+    rfp_histogram *hf = get_cached_histogram(ctx, 0, argv, &owned_hf);
     if (!hf) {
         sqlite3_result_error(ctx, "Invalid histogram JSON", -1);
         return;
     }
 
-    rfp_bitmap *domain = rfp_deserialize(
-        static_cast<const char *>(sqlite3_value_blob(argv[1])),
-        static_cast<size_t>(sqlite3_value_bytes(argv[1])));
+    rfp_bitmap *domain = get_cached_bitmap(ctx, 1, argv, &owned_domain);
     if (!domain) {
-        rfp_histogram_free(hf);
+        if (owned_hf) rfp_histogram_free(hf);
         sqlite3_result_double(ctx, 0.0);
         return;
     }
 
     sqlite3_result_double(ctx, rfp_histogram_weighted_containment(hf, domain));
-    rfp_histogram_free(hf);
-    rfp_free(domain);
+    if (owned_hf) rfp_histogram_free(hf);
+    if (owned_domain) rfp_free(domain);
 }
 
 /* ========================================================================
@@ -482,10 +565,8 @@ static void sqlite_histogram_bitmap(sqlite3_context *ctx, int argc, sqlite3_valu
         return;
     }
 
-    const char *json = reinterpret_cast<const char *>(sqlite3_value_text(argv[0]));
-    int json_len = sqlite3_value_bytes(argv[0]);
-
-    rfp_histogram *hf = rfp_histogram_from_json(json, static_cast<size_t>(json_len));
+    bool owned_hf;
+    rfp_histogram *hf = get_cached_histogram(ctx, 0, argv, &owned_hf);
     if (!hf) {
         sqlite3_result_error(ctx, "Invalid histogram JSON", -1);
         return;
@@ -493,14 +574,14 @@ static void sqlite_histogram_bitmap(sqlite3_context *ctx, int argc, sqlite3_valu
 
     const rfp_bitmap *bm = rfp_histogram_bitmap(hf);
     if (!bm) {
-        rfp_histogram_free(hf);
+        if (owned_hf) rfp_histogram_free(hf);
         sqlite3_result_null(ctx);
         return;
     }
 
-    /* Copy the bitmap since hf owns it */
+    /* Copy the bitmap since hf owns it (whether cached or not) */
     rfp_bitmap *copy = rfp_copy(bm);
-    rfp_histogram_free(hf);
+    if (owned_hf) rfp_histogram_free(hf);
 
     if (!copy) {
         sqlite3_result_null(ctx);
@@ -530,17 +611,15 @@ static void sqlite_histogram_shape(sqlite3_context *ctx, int argc, sqlite3_value
         return;
     }
 
-    const char *json = reinterpret_cast<const char *>(sqlite3_value_text(argv[0]));
-    int json_len = sqlite3_value_bytes(argv[0]);
-
-    rfp_histogram *hf = rfp_histogram_from_json(json, static_cast<size_t>(json_len));
+    bool owned_hf;
+    rfp_histogram *hf = get_cached_histogram(ctx, 0, argv, &owned_hf);
     if (!hf) {
         sqlite3_result_error(ctx, "Invalid histogram JSON", -1);
         return;
     }
 
     char *shape = rfp_histogram_shape_json(hf);
-    rfp_histogram_free(hf);
+    if (owned_hf) rfp_histogram_free(hf);
 
     if (!shape) {
         sqlite3_result_error(ctx, "Failed to serialize shape", -1);
@@ -560,24 +639,20 @@ static void sqlite_histogram_similarity(sqlite3_context *ctx, int argc, sqlite3_
         return;
     }
 
-    const char *json_a = reinterpret_cast<const char *>(sqlite3_value_text(argv[0]));
-    int len_a = sqlite3_value_bytes(argv[0]);
-    const char *json_b = reinterpret_cast<const char *>(sqlite3_value_text(argv[1]));
-    int len_b = sqlite3_value_bytes(argv[1]);
-
-    rfp_histogram *a = rfp_histogram_from_json(json_a, static_cast<size_t>(len_a));
-    rfp_histogram *b = rfp_histogram_from_json(json_b, static_cast<size_t>(len_b));
+    bool owned_a, owned_b;
+    rfp_histogram *a = get_cached_histogram(ctx, 0, argv, &owned_a);
+    rfp_histogram *b = get_cached_histogram(ctx, 1, argv, &owned_b);
 
     if (!a || !b) {
-        rfp_histogram_free(a);
-        rfp_histogram_free(b);
+        if (a && owned_a) rfp_histogram_free(a);
+        if (b && owned_b) rfp_histogram_free(b);
         sqlite3_result_error(ctx, "Invalid histogram JSON", -1);
         return;
     }
 
     sqlite3_result_double(ctx, rfp_histogram_shape_similarity(a, b));
-    rfp_histogram_free(a);
-    rfp_histogram_free(b);
+    if (owned_a) rfp_histogram_free(a);
+    if (owned_b) rfp_histogram_free(b);
 }
 
 /* ========================================================================
