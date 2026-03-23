@@ -48,13 +48,13 @@ CREATE TABLE domain_fingerprints (
 );
 
 INSERT INTO domain_fingerprints
-SELECT 'us_states', COUNT(*), roaring_build(symbol) FROM domain_us_states;
+SELECT 'us_states', COUNT(*), bf_build(symbol) FROM domain_us_states;
 
 INSERT INTO domain_fingerprints
-SELECT 'currencies', COUNT(*), roaring_build(symbol) FROM domain_currencies;
+SELECT 'currencies', COUNT(*), bf_build(symbol) FROM domain_currencies;
 
 SELECT domain_name, symbol_count,
-       roaring_cardinality(fingerprint) AS fp_cardinality
+       bf_cardinality(fingerprint) AS fp_cardinality
 FROM domain_fingerprints;
 
 -- =================================================================
@@ -145,7 +145,7 @@ WITH COLUMN_STATS AS (
         COUNT(DISTINCT value) AS n_distinct,
         SUM(freq) AS total_rows,
         AVG(freq) AS avg_freq,
-        roaring_build_histogram(value, freq) AS hist_fp
+        bf_build_histogram(value, freq) AS hist_fp
     FROM sampled_freq
     GROUP BY column_name
 )
@@ -153,7 +153,7 @@ SELECT
     column_name,
     n_distinct,
     total_rows,
-    roaring_histogram_set_shape(
+    bf_histogram_set_shape(
         hist_fp,
         '{"cardinality_ratio":' || (n_distinct::DOUBLE / total_rows) || ','
         || '"repeatability":' || avg_freq || ','
@@ -169,7 +169,7 @@ SELECT
     column_name,
     n_distinct,
     total_rows::INTEGER AS sample_rows,
-    roaring_histogram_shape(hist_fp) AS shape
+    bf_histogram_shape(hist_fp) AS shape
 FROM sampled_histograms;
 
 -- =================================================================
@@ -183,8 +183,8 @@ SELECT
     d.domain_name,
     d.symbol_count AS domain_size,
     h.n_distinct AS sample_distinct,
-    roaring_histogram_containment(h.hist_fp, d.fingerprint)   AS weighted_containment,
-    roaring_containment(roaring_histogram_bitmap(h.hist_fp),
+    bf_histogram_containment(h.hist_fp, d.fingerprint)   AS weighted_containment,
+    bf_containment(bf_histogram_bitmap(h.hist_fp),
                         d.fingerprint)                        AS unweighted_containment
 FROM sampled_histograms AS h
 CROSS JOIN domain_fingerprints AS d
@@ -204,10 +204,10 @@ WITH BEST_MATCH AS (
         h.n_distinct,
         h.total_rows,
         d.domain_name,
-        roaring_histogram_containment(h.hist_fp, d.fingerprint) AS best_containment,
+        bf_histogram_containment(h.hist_fp, d.fingerprint) AS best_containment,
         ROW_NUMBER() OVER (
             PARTITION BY h.column_name
-            ORDER BY roaring_histogram_containment(h.hist_fp, d.fingerprint) DESC
+            ORDER BY bf_histogram_containment(h.hist_fp, d.fingerprint) DESC
         ) AS rn
     FROM sampled_histograms AS h
     CROSS JOIN domain_fingerprints AS d
@@ -259,13 +259,13 @@ COLUMN_STATS AS (
         COUNT(DISTINCT value) AS n_distinct,
         SUM(freq) AS total_rows,
         AVG(freq) AS avg_freq,
-        roaring_build_histogram(value, freq) AS hist_fp
+        bf_build_histogram(value, freq) AS hist_fp
     FROM FREQ
     GROUP BY column_name
 )
 SELECT
     column_name,
-    roaring_histogram_set_shape(
+    bf_histogram_set_shape(
         hist_fp,
         '{"cardinality_ratio":' || (n_distinct::DOUBLE / total_rows) || ','
         || '"repeatability":' || avg_freq || ','
@@ -279,7 +279,7 @@ FROM COLUMN_STATS;
 -- Shape similarity between two independent samples (lower = more similar)
 SELECT
     a.column_name,
-    roaring_histogram_similarity(a.hist_fp, b.hist_fp) AS shape_distance
+    bf_histogram_similarity(a.hist_fp, b.hist_fp) AS shape_distance
 FROM sampled_histograms AS a
 JOIN sampled_histograms_2 AS b USING (column_name)
 ORDER BY a.column_name;

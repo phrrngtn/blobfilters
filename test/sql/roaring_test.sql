@@ -5,7 +5,7 @@
 -- LOAD 'build/roaring_extension.duckdb_extension';
 
 -- ============================================================
--- Test 1: Basic roaring_build and roaring_cardinality
+-- Test 1: Basic bf_build and bf_cardinality
 -- ============================================================
 
 -- Create test table with integers
@@ -13,7 +13,7 @@ CREATE OR REPLACE TABLE test_integers AS
 SELECT * FROM range(1, 1001) t(id);
 
 -- Build a roaring bitmap from integers
-SELECT roaring_cardinality(roaring_build(id)) AS cardinality
+SELECT bf_cardinality(bf_build(id)) AS cardinality
 FROM test_integers;
 -- Expected: 1000
 
@@ -25,7 +25,7 @@ CREATE OR REPLACE TABLE test_strings AS
 SELECT 'user_' || i AS username
 FROM range(1, 501) t(i);
 
-SELECT roaring_cardinality(roaring_build(username)) AS cardinality
+SELECT bf_cardinality(bf_build(username)) AS cardinality
 FROM test_strings;
 -- Expected: 500
 
@@ -39,13 +39,13 @@ CREATE OR REPLACE TABLE set_b AS SELECT * FROM range(51, 151) t(val);   -- 51-15
 
 -- Build bitmaps
 CREATE OR REPLACE TABLE bitmap_a AS
-SELECT roaring_build(val) AS bm FROM set_a;
+SELECT bf_build(val) AS bm FROM set_a;
 
 CREATE OR REPLACE TABLE bitmap_b AS
-SELECT roaring_build(val) AS bm FROM set_b;
+SELECT bf_build(val) AS bm FROM set_b;
 
 -- Test intersection cardinality (should be 50: values 51-100)
-SELECT roaring_intersection_card(a.bm, b.bm) AS intersection_count
+SELECT bf_intersection_card(a.bm, b.bm) AS intersection_count
 FROM bitmap_a a, bitmap_b b;
 -- Expected: 50
 
@@ -55,12 +55,12 @@ FROM bitmap_a a, bitmap_b b;
 
 -- set_a has 100 elements, 50 of which are in set_b
 -- containment(a, b) = |A ∩ B| / |A| = 50/100 = 0.5
-SELECT roaring_containment(a.bm, b.bm) AS containment_a_in_b
+SELECT bf_containment(a.bm, b.bm) AS containment_a_in_b
 FROM bitmap_a a, bitmap_b b;
 -- Expected: 0.5
 
 -- containment(b, a) = |A ∩ B| / |B| = 50/100 = 0.5
-SELECT roaring_containment(b.bm, a.bm) AS containment_b_in_a
+SELECT bf_containment(b.bm, a.bm) AS containment_b_in_a
 FROM bitmap_a a, bitmap_b b;
 -- Expected: 0.5
 
@@ -71,7 +71,7 @@ FROM bitmap_a a, bitmap_b b;
 -- |A| = 100, |B| = 100, |A ∩ B| = 50
 -- |A ∪ B| = 100 + 100 - 50 = 150
 -- Jaccard = 50/150 = 0.333...
-SELECT roaring_jaccard(a.bm, b.bm) AS jaccard_similarity
+SELECT bf_jaccard(a.bm, b.bm) AS jaccard_similarity
 FROM bitmap_a a, bitmap_b b;
 -- Expected: ~0.333
 
@@ -85,19 +85,19 @@ SELECT
     'db1' AS source_db,
     'users' AS source_table,
     'user_id' AS source_column,
-    roaring_build(id) AS fingerprint,
+    bf_build(id) AS fingerprint,
     COUNT(*) AS row_count
 FROM range(1, 10001) t(id)
 UNION ALL
 SELECT
     'db1', 'orders', 'order_id',
-    roaring_build(id),
+    bf_build(id),
     COUNT(*)
 FROM range(1, 5001) t(id)
 UNION ALL
 SELECT
     'db1', 'products', 'product_id',
-    roaring_build(id),
+    bf_build(id),
     COUNT(*)
 FROM range(1, 1001) t(id);
 
@@ -107,16 +107,16 @@ SELECT * FROM range(500, 1500) t(val);  -- 1000 values, 500 overlap with user_id
 
 -- Build input fingerprint
 CREATE OR REPLACE TABLE input_fp AS
-SELECT roaring_build(val) AS fp FROM input_column;
+SELECT bf_build(val) AS fp FROM input_column;
 
 -- Find best matches
 SELECT
     f.source_table,
     f.source_column,
-    roaring_cardinality(f.fingerprint) AS stored_card,
-    roaring_intersection_card(f.fingerprint, i.fp) AS overlap,
-    roaring_containment(i.fp, f.fingerprint) AS containment,
-    roaring_jaccard(f.fingerprint, i.fp) AS jaccard
+    bf_cardinality(f.fingerprint) AS stored_card,
+    bf_intersection_card(f.fingerprint, i.fp) AS overlap,
+    bf_containment(i.fp, f.fingerprint) AS containment,
+    bf_jaccard(f.fingerprint, i.fp) AS jaccard
 FROM fingerprints f, input_fp i
 ORDER BY containment DESC;
 
@@ -129,7 +129,7 @@ SELECT CASE WHEN i % 3 = 0 THEN NULL ELSE i END AS val
 FROM range(1, 101) t(i);
 
 -- Should only count non-NULL values (~66)
-SELECT roaring_cardinality(roaring_build(val)) AS cardinality
+SELECT bf_cardinality(bf_build(val)) AS cardinality
 FROM test_nulls;
 
 -- ============================================================
@@ -138,11 +138,11 @@ FROM test_nulls;
 
 -- Store serialized bitmap
 CREATE OR REPLACE TABLE stored_bitmap AS
-SELECT roaring_build(id) AS serialized
+SELECT bf_build(id) AS serialized
 FROM range(1, 1001) t(id);
 
 -- Verify it round-trips correctly
-SELECT roaring_cardinality(serialized) AS cardinality
+SELECT bf_cardinality(serialized) AS cardinality
 FROM stored_bitmap;
 -- Expected: 1000
 
@@ -163,7 +163,7 @@ SELECT * FROM (VALUES
 
 -- Build histogram fingerprint
 CREATE OR REPLACE TABLE test_hist_fp AS
-SELECT roaring_build_histogram(
+SELECT bf_build_histogram(
     range_high_key, equal_rows, range_rows,
     distinct_range_rows, average_range_rows
 ) AS hist_fp
@@ -173,10 +173,10 @@ SELECT 'Histogram fingerprint built' AS status;
 SELECT hist_fp FROM test_hist_fp;
 
 -- Extract shape metrics
-SELECT roaring_histogram_shape(hist_fp) AS shape FROM test_hist_fp;
+SELECT bf_histogram_shape(hist_fp) AS shape FROM test_hist_fp;
 
 -- Extract bitmap and check cardinality
-SELECT roaring_cardinality(roaring_histogram_bitmap(hist_fp)) AS bitmap_cardinality
+SELECT bf_cardinality(bf_histogram_bitmap(hist_fp)) AS bitmap_cardinality
 FROM test_hist_fp;
 -- Expected: 5
 
@@ -186,19 +186,19 @@ FROM test_hist_fp;
 
 -- Build extensional domain containing AL, CA, NY, TX, FL + more states
 CREATE OR REPLACE TABLE test_states_domain AS
-SELECT roaring_build(state) AS domain FROM (VALUES
+SELECT bf_build(state) AS domain FROM (VALUES
     ('AL'),('CA'),('NY'),('TX'),('FL'),
     ('OH'),('PA'),('IL'),('GA'),('NC')
 ) AS t(state);
 
 -- Weighted containment: all histogram keys are in the domain
 -- (10000+50000+40000+35000+25000) / total = 1.0
-SELECT roaring_histogram_containment(h.hist_fp, d.domain) AS weighted_containment
+SELECT bf_histogram_containment(h.hist_fp, d.domain) AS weighted_containment
 FROM test_hist_fp h, test_states_domain d;
 -- Expected: 1.0 (all histogram keys match)
 
 -- Unweighted bitmap containment
-SELECT roaring_containment(roaring_histogram_bitmap(h.hist_fp), d.domain) AS unweighted_containment
+SELECT bf_containment(bf_histogram_bitmap(h.hist_fp), d.domain) AS unweighted_containment
 FROM test_hist_fp h, test_states_domain d;
 -- Expected: 1.0
 
@@ -208,16 +208,16 @@ FROM test_hist_fp h, test_states_domain d;
 
 -- Domain with only AL and CA
 CREATE OR REPLACE TABLE test_partial_domain AS
-SELECT roaring_build(state) AS domain FROM (VALUES
+SELECT bf_build(state) AS domain FROM (VALUES
     ('AL'),('CA')
 ) AS t(state);
 
 -- Weighted: (10000+50000) / 160000 = 0.375
-SELECT roaring_histogram_containment(h.hist_fp, d.domain) AS weighted_containment
+SELECT bf_histogram_containment(h.hist_fp, d.domain) AS weighted_containment
 FROM test_hist_fp h, test_partial_domain d;
 
 -- Unweighted: 2/5 = 0.4
-SELECT roaring_containment(roaring_histogram_bitmap(h.hist_fp), d.domain) AS unweighted_containment
+SELECT bf_containment(bf_histogram_bitmap(h.hist_fp), d.domain) AS unweighted_containment
 FROM test_hist_fp h, test_partial_domain d;
 
 -- ============================================================
@@ -235,22 +235,22 @@ SELECT * FROM (VALUES
 ) AS t(range_high_key, equal_rows, range_rows, distinct_range_rows, average_range_rows);
 
 CREATE OR REPLACE TABLE test_cont_fp AS
-SELECT roaring_build_histogram(
+SELECT bf_build_histogram(
     range_high_key, equal_rows, range_rows,
     distinct_range_rows, average_range_rows
 ) AS hist_fp
 FROM test_continuous_histogram;
 
 -- Shape of continuous histogram (low discreteness, low repeatability)
-SELECT roaring_histogram_shape(hist_fp) AS continuous_shape FROM test_cont_fp;
+SELECT bf_histogram_shape(hist_fp) AS continuous_shape FROM test_cont_fp;
 
 -- Similarity: discrete vs continuous should be high (different)
-SELECT roaring_histogram_similarity(d.hist_fp, c.hist_fp) AS shape_distance
+SELECT bf_histogram_similarity(d.hist_fp, c.hist_fp) AS shape_distance
 FROM test_hist_fp d, test_cont_fp c;
 -- Expected: > 0.1 (significantly different shapes)
 
 -- Self-similarity should be 0
-SELECT roaring_histogram_similarity(d.hist_fp, d.hist_fp) AS self_similarity
+SELECT bf_histogram_similarity(d.hist_fp, d.hist_fp) AS self_similarity
 FROM test_hist_fp d;
 -- Expected: 0.0
 
@@ -270,15 +270,15 @@ SELECT * FROM (VALUES
 
 -- Build with 2-arg form
 CREATE OR REPLACE TABLE test_sample_fp AS
-SELECT roaring_build_histogram(state_value, sample_count) AS hist_fp
+SELECT bf_build_histogram(state_value, sample_count) AS hist_fp
 FROM test_sample;
 
-SELECT roaring_cardinality(roaring_histogram_bitmap(hist_fp)) AS bitmap_cardinality
+SELECT bf_cardinality(bf_histogram_bitmap(hist_fp)) AS bitmap_cardinality
 FROM test_sample_fp;
 -- Expected: 5
 
 -- Weighted containment against known domain
-SELECT roaring_histogram_containment(h.hist_fp, d.domain) AS weighted_containment
+SELECT bf_histogram_containment(h.hist_fp, d.domain) AS weighted_containment
 FROM test_sample_fp AS h, test_states_domain AS d;
 -- Expected: 1.0
 
@@ -287,18 +287,18 @@ FROM test_sample_fp AS h, test_states_domain AS d;
 -- ============================================================
 
 CREATE OR REPLACE TABLE test_shaped_fp AS
-SELECT roaring_histogram_set_shape(
+SELECT bf_histogram_set_shape(
     hist_fp,
     '{"cardinality_ratio":0.05,"repeatability":320.0,"discreteness":1.0,"range_density":0.0,"source_query":"TABLESAMPLE"}'
 ) AS hist_fp
 FROM test_sample_fp;
 
 -- Verify injected shape
-SELECT roaring_histogram_shape(hist_fp) AS shape FROM test_shaped_fp;
+SELECT bf_histogram_shape(hist_fp) AS shape FROM test_shaped_fp;
 -- Should include cardinality_ratio, repeatability, discreteness AND source_query
 
 -- Shape similarity: sample vs SQL Server histogram of same column
-SELECT roaring_histogram_similarity(a.hist_fp, b.hist_fp) AS sample_vs_histogram
+SELECT bf_histogram_similarity(a.hist_fp, b.hist_fp) AS sample_vs_histogram
 FROM test_shaped_fp AS a, test_hist_fp AS b;
 -- Expected: small distance (similar shapes)
 

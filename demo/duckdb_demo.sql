@@ -90,7 +90,7 @@ UNION ALL SELECT 'elements', COUNT(*) FROM domain_elements;
 -- =================================================================
 -- STEP 2: Build fingerprints into a unified table
 --
--- DuckDB advantage: roaring_build() is a native aggregate function,
+-- DuckDB advantage: bf_build() is a native aggregate function,
 -- so we can build directly from column values — no JSON intermediate.
 -- =================================================================
 
@@ -103,26 +103,26 @@ CREATE TABLE domain_fingerprints (
 );
 
 INSERT INTO domain_fingerprints
-SELECT 'us_states', COUNT(*), roaring_build(symbol) FROM domain_us_states;
+SELECT 'us_states', COUNT(*), bf_build(symbol) FROM domain_us_states;
 
 INSERT INTO domain_fingerprints
-SELECT 'currencies', COUNT(*), roaring_build(symbol) FROM domain_currencies;
+SELECT 'currencies', COUNT(*), bf_build(symbol) FROM domain_currencies;
 
 INSERT INTO domain_fingerprints
-SELECT 'http_status', COUNT(*), roaring_build(symbol) FROM domain_http_status;
+SELECT 'http_status', COUNT(*), bf_build(symbol) FROM domain_http_status;
 
 INSERT INTO domain_fingerprints
-SELECT 'mime_types', COUNT(*), roaring_build(symbol) FROM domain_mime_types;
+SELECT 'mime_types', COUNT(*), bf_build(symbol) FROM domain_mime_types;
 
 INSERT INTO domain_fingerprints
-SELECT 'languages', COUNT(*), roaring_build(symbol) FROM domain_languages;
+SELECT 'languages', COUNT(*), bf_build(symbol) FROM domain_languages;
 
 INSERT INTO domain_fingerprints
-SELECT 'elements', COUNT(*), roaring_build(symbol) FROM domain_elements;
+SELECT 'elements', COUNT(*), bf_build(symbol) FROM domain_elements;
 
 SELECT domain_name,
        symbol_count,
-       roaring_cardinality(fingerprint) AS fp_cardinality,
+       bf_cardinality(fingerprint) AS fp_cardinality,
        octet_length(fingerprint) AS blob_bytes
 FROM domain_fingerprints
 ORDER BY symbol_count DESC;
@@ -138,7 +138,7 @@ SELECT '>>> STEP 3: Probe wild symbols via CROSS JOIN' AS info;
 
 .timer on
 WITH probe AS (
-    SELECT roaring_build_json(
+    SELECT bf_build_json(
         '["California","Texas","New York","Florida","Ohio",
           "Illinois","Georgia","Oregon",
           "USD","EUR","GBP","JPY","CHF",
@@ -150,23 +150,23 @@ WITH probe AS (
 SELECT
     d.domain_name,
     d.symbol_count                                     AS domain_size,
-    roaring_cardinality(probe.fp)                      AS probe_size,
-    roaring_intersection_card(probe.fp, d.fingerprint) AS est_hits,
-    roaring_containment(probe.fp, d.fingerprint)       AS containment,
-    roaring_jaccard(probe.fp, d.fingerprint)           AS jaccard
+    bf_cardinality(probe.fp)                      AS probe_size,
+    bf_intersection_card(probe.fp, d.fingerprint) AS est_hits,
+    bf_containment(probe.fp, d.fingerprint)       AS containment,
+    bf_jaccard(probe.fp, d.fingerprint)           AS jaccard
 FROM domain_fingerprints d, probe
 ORDER BY containment DESC;
 
 -- =================================================================
--- STEP 4: Same query using roaring_containment_json (no CTE needed)
+-- STEP 4: Same query using bf_containment_json (no CTE needed)
 -- =================================================================
 
-SELECT '>>> STEP 4: Direct JSON probe via roaring_containment_json' AS info;
+SELECT '>>> STEP 4: Direct JSON probe via bf_containment_json' AS info;
 
 SELECT
     domain_name,
     symbol_count                                       AS domain_size,
-    roaring_containment_json(
+    bf_containment_json(
         '["California","Texas","New York","Florida","Ohio",
           "Illinois","Georgia","Oregon",
           "USD","EUR","GBP","JPY","CHF",
@@ -185,15 +185,15 @@ ORDER BY containment DESC;
 SELECT '>>> STEP 5: Pure currency probe' AS info;
 
 WITH probe AS (
-    SELECT roaring_build_json(
+    SELECT bf_build_json(
         '["USD","EUR","GBP","JPY","CHF","CAD","AUD","NZD"]'
     ) AS fp
 )
 SELECT
     d.domain_name,
     d.symbol_count                                     AS domain_size,
-    roaring_intersection_card(probe.fp, d.fingerprint) AS est_hits,
-    roaring_containment(probe.fp, d.fingerprint)       AS containment
+    bf_intersection_card(probe.fp, d.fingerprint) AS est_hits,
+    bf_containment(probe.fp, d.fingerprint)       AS containment
 FROM domain_fingerprints d, probe
 ORDER BY containment DESC;
 
@@ -204,21 +204,21 @@ ORDER BY containment DESC;
 SELECT '>>> STEP 6: Pure noise probe' AS info;
 
 WITH probe AS (
-    SELECT roaring_build_json(
+    SELECT bf_build_json(
         '["xyzzy","plugh","42","DEADBEEF","asdf"]'
     ) AS fp
 )
 SELECT
     d.domain_name,
-    roaring_intersection_card(probe.fp, d.fingerprint) AS est_hits,
-    roaring_containment(probe.fp, d.fingerprint)       AS containment
+    bf_intersection_card(probe.fp, d.fingerprint) AS est_hits,
+    bf_containment(probe.fp, d.fingerprint)       AS containment
 FROM domain_fingerprints d, probe
 ORDER BY containment DESC;
 
 -- =================================================================
 -- STEP 7 (DuckDB bonus): Build fingerprint directly from aggregate
 --
--- DuckDB's roaring_build() aggregate means you can build a domain
+-- DuckDB's bf_build() aggregate means you can build a domain
 -- fingerprint in a single query without JSON intermediaries.
 -- =================================================================
 
@@ -235,21 +235,21 @@ WITH all_domains AS (
 domain_fps AS (
     SELECT domain_name,
            COUNT(*) AS symbol_count,
-           roaring_build(symbol) AS fingerprint
+           bf_build(symbol) AS fingerprint
     FROM all_domains
     GROUP BY domain_name
 ),
 probe AS (
-    SELECT roaring_build_json(
+    SELECT bf_build_json(
         '["California","Texas","USD","EUR","404 Not Found","Python"]'
     ) AS fp
 )
 SELECT
     d.domain_name,
     d.symbol_count,
-    roaring_containment(probe.fp, d.fingerprint) AS containment
+    bf_containment(probe.fp, d.fingerprint) AS containment
 FROM domain_fps d, probe
-WHERE roaring_intersection_card(probe.fp, d.fingerprint) > 0
+WHERE bf_intersection_card(probe.fp, d.fingerprint) > 0
 ORDER BY containment DESC;
 
 -- =================================================================
@@ -279,7 +279,7 @@ SELECT * FROM (VALUES
 
 -- Build histogram fingerprint
 CREATE TABLE hist_fp_state AS
-SELECT roaring_build_histogram(
+SELECT bf_build_histogram(
     range_high_key, equal_rows, range_rows,
     distinct_range_rows, average_range_rows
 ) AS hist_fp
@@ -287,7 +287,7 @@ FROM hist_state_code;
 
 -- Show shape metrics (expect: fully discrete, high repeatability)
 SELECT '>>> Shape metrics for state_code histogram:' AS info;
-SELECT roaring_histogram_shape(hist_fp) AS shape FROM hist_fp_state;
+SELECT bf_histogram_shape(hist_fp) AS shape FROM hist_fp_state;
 
 -- =================================================================
 -- STEP 9: Compare histogram fingerprint against extensional domains
@@ -298,9 +298,9 @@ SELECT '>>> STEP 9: Weighted containment — histogram vs domain fingerprints' A
 SELECT
     d.domain_name,
     d.symbol_count                                            AS domain_size,
-    roaring_cardinality(roaring_histogram_bitmap(h.hist_fp))  AS hist_keys,
-    roaring_histogram_containment(h.hist_fp, d.fingerprint)   AS weighted_containment,
-    roaring_containment(roaring_histogram_bitmap(h.hist_fp),
+    bf_cardinality(bf_histogram_bitmap(h.hist_fp))  AS hist_keys,
+    bf_histogram_containment(h.hist_fp, d.fingerprint)   AS weighted_containment,
+    bf_containment(bf_histogram_bitmap(h.hist_fp),
                         d.fingerprint)                        AS unweighted_containment
 FROM domain_fingerprints AS d, hist_fp_state AS h
 ORDER BY weighted_containment DESC;
@@ -321,7 +321,7 @@ SELECT * FROM (VALUES
 ) AS t(range_high_key, equal_rows, range_rows, distinct_range_rows, average_range_rows);
 
 CREATE TABLE hist_fp_amount AS
-SELECT roaring_build_histogram(
+SELECT bf_build_histogram(
     range_high_key, equal_rows, range_rows,
     distinct_range_rows, average_range_rows
 ) AS hist_fp
@@ -330,16 +330,16 @@ FROM hist_amount;
 -- Compare shapes: state_code (dimension) vs amount (measure)
 SELECT
     'state_code (dimension)' AS column_type,
-    roaring_histogram_shape(hist_fp) AS shape
+    bf_histogram_shape(hist_fp) AS shape
 FROM hist_fp_state
 UNION ALL
 SELECT
     'amount (measure)',
-    roaring_histogram_shape(hist_fp)
+    bf_histogram_shape(hist_fp)
 FROM hist_fp_amount;
 
 -- Shape similarity distance (0 = identical, higher = more different)
-SELECT roaring_histogram_similarity(s.hist_fp, a.hist_fp) AS shape_distance
+SELECT bf_histogram_similarity(s.hist_fp, a.hist_fp) AS shape_distance
 FROM hist_fp_state AS s, hist_fp_amount AS a;
 
 -- =================================================================
@@ -368,12 +368,12 @@ SELECT * FROM (VALUES
 
 -- Build with 2-arg form: just key + weight
 CREATE TABLE sample_fp_state AS
-SELECT roaring_build_histogram(state_value, sample_count::DOUBLE) AS hist_fp
+SELECT bf_build_histogram(state_value, sample_count::DOUBLE) AS hist_fp
 FROM sample_state;
 
 -- Inject shape computed in SQL (the SQL layer knows the source semantics)
 CREATE TABLE sample_fp_shaped AS
-SELECT roaring_histogram_set_shape(
+SELECT bf_histogram_set_shape(
     hist_fp,
     '{"cardinality_ratio":' || (10.0 / 4680) || ','
     || '"repeatability":' || (4680.0 / 10) || ','
@@ -385,13 +385,13 @@ SELECT roaring_histogram_set_shape(
 FROM sample_fp_state;
 
 -- Show shape (includes custom fields)
-SELECT roaring_histogram_shape(hist_fp) AS shape FROM sample_fp_shaped;
+SELECT bf_histogram_shape(hist_fp) AS shape FROM sample_fp_shaped;
 
 -- Compare against extensional domains — should match us_states
 SELECT
     d.domain_name,
-    roaring_histogram_containment(h.hist_fp, d.fingerprint)   AS weighted_containment,
-    roaring_containment(roaring_histogram_bitmap(h.hist_fp),
+    bf_histogram_containment(h.hist_fp, d.fingerprint)   AS weighted_containment,
+    bf_containment(bf_histogram_bitmap(h.hist_fp),
                         d.fingerprint)                        AS unweighted_containment
 FROM domain_fingerprints AS d, sample_fp_shaped AS h
 ORDER BY weighted_containment DESC;
@@ -407,25 +407,25 @@ SELECT '>>> STEP 12: Cross-source shape comparison' AS info;
 
 SELECT
     'sqlserver_histogram' AS source,
-    roaring_histogram_shape(hist_fp) AS shape
+    bf_histogram_shape(hist_fp) AS shape
 FROM hist_fp_state
 UNION ALL
 SELECT
     'tablesample',
-    roaring_histogram_shape(hist_fp)
+    bf_histogram_shape(hist_fp)
 FROM sample_fp_shaped
 UNION ALL
 SELECT
     'sqlserver_amount',
-    roaring_histogram_shape(hist_fp)
+    bf_histogram_shape(hist_fp)
 FROM hist_fp_amount;
 
 -- Same column from different sources: should be similar
-SELECT roaring_histogram_similarity(a.hist_fp, b.hist_fp) AS state_vs_sample
+SELECT bf_histogram_similarity(a.hist_fp, b.hist_fp) AS state_vs_sample
 FROM hist_fp_state AS a, sample_fp_shaped AS b;
 
 -- Different columns: should be very different
-SELECT roaring_histogram_similarity(a.hist_fp, b.hist_fp) AS state_vs_amount
+SELECT bf_histogram_similarity(a.hist_fp, b.hist_fp) AS state_vs_amount
 FROM sample_fp_shaped AS a, hist_fp_amount AS b;
 
 SELECT '>>> Demo complete.' AS info;

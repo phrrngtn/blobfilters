@@ -2,17 +2,17 @@
  * SQLite extension for roaring bitmap fingerprinting
  *
  * Aggregate:
- *   roaring_build(value TEXT) -> BLOB    (hashes each value, builds bitmap)
+ *   bf_build(value TEXT) -> BLOB    (hashes each value, builds bitmap)
  *
  * Scalar:
- *   roaring_build_json(json_array TEXT) -> BLOB
- *   roaring_cardinality(blob BLOB) -> INTEGER
- *   roaring_intersection_card(a BLOB, b BLOB) -> INTEGER
- *   roaring_containment(probe BLOB, ref BLOB) -> REAL
- *   roaring_jaccard(a BLOB, b BLOB) -> REAL
- *   roaring_to_base64(blob BLOB) -> TEXT
- *   roaring_from_base64(text TEXT) -> BLOB
- *   roaring_containment_json(symbols_json TEXT, ref BLOB) -> REAL
+ *   bf_build_json(json_array TEXT) -> BLOB
+ *   bf_cardinality(blob BLOB) -> INTEGER
+ *   bf_intersection_card(a BLOB, b BLOB) -> INTEGER
+ *   bf_containment(probe BLOB, ref BLOB) -> REAL
+ *   bf_jaccard(a BLOB, b BLOB) -> REAL
+ *   bf_to_base64(blob BLOB) -> TEXT
+ *   bf_from_base64(text TEXT) -> BLOB
+ *   bf_containment_json(symbols_json TEXT, ref BLOB) -> REAL
  */
 
 #include <sqlite3ext.h>
@@ -25,10 +25,10 @@ SQLITE_EXTENSION_INIT1
 #include <cstring>
 
 /* ========================================================================
- * roaring_build(value) -> BLOB   [aggregate]
+ *   bf_build(value) -> BLOB   [aggregate]
  *
  * Hashes each non-NULL text value via FNV-1a and adds to a roaring bitmap.
- * Equivalent to DuckDB's roaring_build() aggregate.
+ * Equivalent to DuckDB's bf_build() aggregate.
  * ======================================================================== */
 
 struct RoaringAggCtx {
@@ -87,7 +87,7 @@ static void sqlite_roaring_build_final(sqlite3_context *ctx) {
 }
 
 /* ========================================================================
- * roaring_build_json(json_array TEXT) -> BLOB
+ *   bf_build_json(json_array TEXT) -> BLOB
  * ======================================================================== */
 
 static void sqlite_roaring_build_json(sqlite3_context *ctx, int argc, sqlite3_value **argv) {
@@ -120,7 +120,7 @@ static void sqlite_roaring_build_json(sqlite3_context *ctx, int argc, sqlite3_va
 }
 
 /* ========================================================================
- * roaring_cardinality(blob BLOB) -> INTEGER
+ *   bf_cardinality(blob BLOB) -> INTEGER
  * ======================================================================== */
 
 /* ── auxdata helpers for caching deserialized bitmaps/histograms ──────
@@ -236,7 +236,7 @@ static void sqlite_roaring_cardinality(sqlite3_context *ctx, int argc, sqlite3_v
 }
 
 /* ========================================================================
- * roaring_intersection_card(a BLOB, b BLOB) -> INTEGER
+ *   bf_intersection_card(a BLOB, b BLOB) -> INTEGER
  * ======================================================================== */
 
 static void sqlite_roaring_intersection_card(sqlite3_context *ctx, int argc, sqlite3_value **argv) {
@@ -262,7 +262,7 @@ static void sqlite_roaring_intersection_card(sqlite3_context *ctx, int argc, sql
 }
 
 /* ========================================================================
- * roaring_containment(probe BLOB, ref BLOB) -> REAL
+ *   bf_containment(probe BLOB, ref BLOB) -> REAL
  * ======================================================================== */
 
 static void sqlite_roaring_containment(sqlite3_context *ctx, int argc, sqlite3_value **argv) {
@@ -288,7 +288,7 @@ static void sqlite_roaring_containment(sqlite3_context *ctx, int argc, sqlite3_v
 }
 
 /* ========================================================================
- * roaring_jaccard(a BLOB, b BLOB) -> REAL
+ *   bf_jaccard(a BLOB, b BLOB) -> REAL
  * ======================================================================== */
 
 static void sqlite_roaring_jaccard(sqlite3_context *ctx, int argc, sqlite3_value **argv) {
@@ -314,7 +314,7 @@ static void sqlite_roaring_jaccard(sqlite3_context *ctx, int argc, sqlite3_value
 }
 
 /* ========================================================================
- * roaring_to_base64(blob BLOB) -> TEXT
+ *   bf_to_base64(blob BLOB) -> TEXT
  * ======================================================================== */
 
 static void sqlite_roaring_to_base64(sqlite3_context *ctx, int argc, sqlite3_value **argv) {
@@ -345,7 +345,7 @@ static void sqlite_roaring_to_base64(sqlite3_context *ctx, int argc, sqlite3_val
 }
 
 /* ========================================================================
- * roaring_from_base64(text TEXT) -> BLOB
+ *   bf_from_base64(text TEXT) -> BLOB
  * ======================================================================== */
 
 static void sqlite_roaring_from_base64(sqlite3_context *ctx, int argc, sqlite3_value **argv) {
@@ -377,7 +377,7 @@ static void sqlite_roaring_from_base64(sqlite3_context *ctx, int argc, sqlite3_v
 }
 
 /* ========================================================================
- * roaring_containment_json(symbols_json TEXT, ref_blob BLOB) -> REAL
+ *   bf_containment_json(symbols_json TEXT, ref_blob BLOB) -> REAL
  * Builds a probe from JSON array of strings, returns containment vs ref.
  * ======================================================================== */
 
@@ -411,7 +411,7 @@ static void sqlite_roaring_containment_json(sqlite3_context *ctx, int argc, sqli
 }
 
 /* ========================================================================
- * roaring_build_histogram — two overloads:
+ *   bf_build_histogram — two overloads:
  *   2-arg: (key TEXT, weight REAL) -> TEXT (JSON)       [source-agnostic]
  *   5-arg: (key, equal_rows, range_rows, distinct_range_rows, avg_range_rows)
  *                                                       [SQL Server convenience]
@@ -488,7 +488,7 @@ static void sqlite_histogram_build_final(sqlite3_context *ctx) {
 }
 
 /* ========================================================================
- * roaring_histogram_set_shape(histogram_json TEXT, shape_json TEXT) -> TEXT
+ *   bf_histogram_set_shape(histogram_json TEXT, shape_json TEXT) -> TEXT
  * Merges shape metrics into an existing histogram fingerprint.
  * ======================================================================== */
 
@@ -527,7 +527,7 @@ static void sqlite_histogram_set_shape(sqlite3_context *ctx, int argc, sqlite3_v
 }
 
 /* ========================================================================
- * roaring_histogram_containment(histogram_json TEXT, domain_blob BLOB) -> REAL
+ *   bf_histogram_containment(histogram_json TEXT, domain_blob BLOB) -> REAL
  * ======================================================================== */
 
 static void sqlite_histogram_containment(sqlite3_context *ctx, int argc, sqlite3_value **argv) {
@@ -556,7 +556,7 @@ static void sqlite_histogram_containment(sqlite3_context *ctx, int argc, sqlite3
 }
 
 /* ========================================================================
- * roaring_histogram_bitmap(histogram_json TEXT) -> BLOB
+ *   bf_histogram_bitmap(histogram_json TEXT) -> BLOB
  * ======================================================================== */
 
 static void sqlite_histogram_bitmap(sqlite3_context *ctx, int argc, sqlite3_value **argv) {
@@ -602,7 +602,7 @@ static void sqlite_histogram_bitmap(sqlite3_context *ctx, int argc, sqlite3_valu
 }
 
 /* ========================================================================
- * roaring_histogram_shape(histogram_json TEXT) -> TEXT (JSON)
+ *   bf_histogram_shape(histogram_json TEXT) -> TEXT (JSON)
  * ======================================================================== */
 
 static void sqlite_histogram_shape(sqlite3_context *ctx, int argc, sqlite3_value **argv) {
@@ -630,7 +630,7 @@ static void sqlite_histogram_shape(sqlite3_context *ctx, int argc, sqlite3_value
 }
 
 /* ========================================================================
- * roaring_histogram_similarity(a_json TEXT, b_json TEXT) -> REAL
+ *   bf_histogram_similarity(a_json TEXT, b_json TEXT) -> REAL
  * ======================================================================== */
 
 static void sqlite_histogram_similarity(sqlite3_context *ctx, int argc, sqlite3_value **argv) {
@@ -670,7 +670,7 @@ int sqlite3_roaring_init(sqlite3 *db, char **pzErrMsg, const sqlite3_api_routine
     SQLITE_EXTENSION_INIT2(pApi);
     (void)pzErrMsg;
 
-    /* Aggregate: roaring_build(value) -> BLOB */
+    /* Aggregate: bf_build(value) -> BLOB */
     sqlite3_create_function(db, "bf_build", 1, SQLITE_UTF8 | SQLITE_DETERMINISTIC,
                             nullptr, nullptr, sqlite_roaring_build_step, sqlite_roaring_build_final);
 

@@ -184,7 +184,7 @@ int main(void) {
      * STEP 2: Build fingerprints into a unified table
      *
      * For each domain, we SELECT all symbols as a JSON array, then
-     * roaring_build_json() hashes them into a single bitmap BLOB.
+     * bf_build_json() hashes them into a single bitmap BLOB.
      * ===============================================================
      */
     printf("\n>>> STEP 2: Build domain fingerprints into unified table\n");
@@ -197,47 +197,47 @@ int main(void) {
         ");",
         "create fingerprints table");
 
-    /* Use roaring_build() aggregate — no JSON intermediate needed */
+    /* Use bf_build() aggregate — no JSON intermediate needed */
     exec(db,
         "INSERT INTO domain_fingerprints\n"
-        "SELECT 'us_states', COUNT(*), roaring_build(symbol)\n"
+        "SELECT 'us_states', COUNT(*), bf_build(symbol)\n"
         "FROM domain_us_states;",
         "build us_states fingerprint");
 
     exec(db,
         "INSERT INTO domain_fingerprints\n"
-        "SELECT 'currencies', COUNT(*), roaring_build(symbol)\n"
+        "SELECT 'currencies', COUNT(*), bf_build(symbol)\n"
         "FROM domain_currencies;",
         "build currencies fingerprint");
 
     exec(db,
         "INSERT INTO domain_fingerprints\n"
-        "SELECT 'http_status', COUNT(*), roaring_build(symbol)\n"
+        "SELECT 'http_status', COUNT(*), bf_build(symbol)\n"
         "FROM domain_http_status;",
         "build http_status fingerprint");
 
     exec(db,
         "INSERT INTO domain_fingerprints\n"
-        "SELECT 'mime_types', COUNT(*), roaring_build(symbol)\n"
+        "SELECT 'mime_types', COUNT(*), bf_build(symbol)\n"
         "FROM domain_mime_types;",
         "build mime_types fingerprint");
 
     exec(db,
         "INSERT INTO domain_fingerprints\n"
-        "SELECT 'languages', COUNT(*), roaring_build(symbol)\n"
+        "SELECT 'languages', COUNT(*), bf_build(symbol)\n"
         "FROM domain_languages;",
         "build languages fingerprint");
 
     exec(db,
         "INSERT INTO domain_fingerprints\n"
-        "SELECT 'elements', COUNT(*), roaring_build(symbol)\n"
+        "SELECT 'elements', COUNT(*), bf_build(symbol)\n"
         "FROM domain_elements;",
         "build elements fingerprint");
 
     query_print(db,
         "SELECT domain_name,\n"
         "       symbol_count,\n"
-        "       roaring_cardinality(fingerprint) AS fp_cardinality,\n"
+        "       bf_cardinality(fingerprint) AS fp_cardinality,\n"
         "       LENGTH(fingerprint) AS blob_bytes\n"
         "FROM domain_fingerprints\n"
         "ORDER BY symbol_count DESC;",
@@ -269,10 +269,10 @@ int main(void) {
      * Build a probe bitmap from the JSON, then CROSS JOIN against
      * all domain fingerprints. This is the key pattern:
      *
-     *   WITH probe AS (SELECT roaring_build_json(...) AS fp)
+     *   WITH probe AS (SELECT bf_build_json(...) AS fp)
      *   SELECT d.domain_name,
-     *          roaring_intersection_card(probe.fp, d.fingerprint) AS hits,
-     *          roaring_containment(probe.fp, d.fingerprint) AS containment
+     *          bf_intersection_card(probe.fp, d.fingerprint) AS hits,
+     *          bf_containment(probe.fp, d.fingerprint) AS containment
      *   FROM domain_fingerprints d, probe
      *   ORDER BY containment DESC;
      */
@@ -280,15 +280,15 @@ int main(void) {
     char sql[2048];
     snprintf(sql, sizeof(sql),
         "WITH probe AS (\n"
-        "    SELECT roaring_build_json(%s) AS fp\n"
+        "    SELECT bf_build_json(%s) AS fp\n"
         ")\n"
         "SELECT\n"
         "    d.domain_name,\n"
         "    d.symbol_count                                        AS domain_size,\n"
-        "    roaring_cardinality(probe.fp)                         AS probe_size,\n"
-        "    roaring_intersection_card(probe.fp, d.fingerprint)    AS est_hits,\n"
-        "    roaring_containment(probe.fp, d.fingerprint)          AS containment,\n"
-        "    roaring_jaccard(probe.fp, d.fingerprint)              AS jaccard\n"
+        "    bf_cardinality(probe.fp)                         AS probe_size,\n"
+        "    bf_intersection_card(probe.fp, d.fingerprint)    AS est_hits,\n"
+        "    bf_containment(probe.fp, d.fingerprint)          AS containment,\n"
+        "    bf_jaccard(probe.fp, d.fingerprint)              AS jaccard\n"
         "FROM domain_fingerprints d, probe\n"
         "ORDER BY containment DESC;",
         probe_json);
@@ -303,13 +303,13 @@ int main(void) {
      *         takes raw JSON without materializing the bitmap first
      * ===============================================================
      */
-    printf("\n>>> STEP 4: Same query using roaring_containment_json (JSON in, no CTE needed)\n");
+    printf("\n>>> STEP 4: Same query using bf_containment_json (JSON in, no CTE needed)\n");
 
     snprintf(sql, sizeof(sql),
         "SELECT\n"
         "    domain_name,\n"
         "    symbol_count                                          AS domain_size,\n"
-        "    roaring_containment_json(%s, fingerprint)             AS containment\n"
+        "    bf_containment_json(%s, fingerprint)             AS containment\n"
         "FROM domain_fingerprints\n"
         "ORDER BY containment DESC;",
         probe_json);
@@ -325,15 +325,15 @@ int main(void) {
 
     query_print(db,
         "WITH probe AS (\n"
-        "    SELECT roaring_build_json(\n"
+        "    SELECT bf_build_json(\n"
         "        '[\"USD\",\"EUR\",\"GBP\",\"JPY\",\"CHF\",\"CAD\",\"AUD\",\"NZD\"]'\n"
         "    ) AS fp\n"
         ")\n"
         "SELECT\n"
         "    d.domain_name,\n"
         "    d.symbol_count                                        AS domain_size,\n"
-        "    roaring_intersection_card(probe.fp, d.fingerprint)    AS est_hits,\n"
-        "    roaring_containment(probe.fp, d.fingerprint)          AS containment\n"
+        "    bf_intersection_card(probe.fp, d.fingerprint)    AS est_hits,\n"
+        "    bf_containment(probe.fp, d.fingerprint)          AS containment\n"
         "FROM domain_fingerprints d, probe\n"
         "ORDER BY containment DESC;",
         "8 currency codes — should match currencies at 100%");
@@ -347,14 +347,14 @@ int main(void) {
 
     query_print(db,
         "WITH probe AS (\n"
-        "    SELECT roaring_build_json(\n"
+        "    SELECT bf_build_json(\n"
         "        '[\"xyzzy\",\"plugh\",\"42\",\"DEADBEEF\",\"asdf\"]'\n"
         "    ) AS fp\n"
         ")\n"
         "SELECT\n"
         "    d.domain_name,\n"
-        "    roaring_intersection_card(probe.fp, d.fingerprint)    AS est_hits,\n"
-        "    roaring_containment(probe.fp, d.fingerprint)          AS containment\n"
+        "    bf_intersection_card(probe.fp, d.fingerprint)    AS est_hits,\n"
+        "    bf_containment(probe.fp, d.fingerprint)          AS containment\n"
         "FROM domain_fingerprints d, probe\n"
         "ORDER BY containment DESC;",
         "5 garbage values — should match nothing");

@@ -8,8 +8,8 @@
 --    1. Sample the table once with TABLESAMPLE BERNOULLI
 --    2. UNPIVOT all columns into (column_name, value) rows
 --    3. Aggregate frequencies per (column_name, value)
---    4. Build histogram fingerprint per column via roaring_build_histogram
---    5. Inject shape metrics via roaring_histogram_set_shape
+--    4. Build histogram fingerprint per column via bf_build_histogram
+--    5. Inject shape metrics via bf_histogram_set_shape
 --    6. Compare against domain fingerprints
 --
 --  Prerequisites:
@@ -55,7 +55,7 @@ WITH COLUMN_STATS AS (
         COUNT(DISTINCT value) AS n_distinct,
         SUM(freq) AS total_rows,
         AVG(freq) AS avg_freq,
-        roaring_build_histogram(value, freq) AS hist_fp
+        bf_build_histogram(value, freq) AS hist_fp
     FROM sampled_freq
     GROUP BY column_name
 )
@@ -63,7 +63,7 @@ SELECT
     column_name,
     n_distinct,
     total_rows,
-    roaring_histogram_set_shape(
+    bf_histogram_set_shape(
         hist_fp,
         '{"cardinality_ratio":' || (n_distinct::DOUBLE / total_rows) || ','
         || '"repeatability":' || avg_freq || ','
@@ -80,12 +80,12 @@ SELECT
     h.n_distinct,
     h.total_rows::INTEGER AS sample_rows,
     d.domain_name,
-    roaring_histogram_containment(h.hist_fp, d.fingerprint)   AS weighted_containment,
-    roaring_containment(roaring_histogram_bitmap(h.hist_fp),
+    bf_histogram_containment(h.hist_fp, d.fingerprint)   AS weighted_containment,
+    bf_containment(bf_histogram_bitmap(h.hist_fp),
                         d.fingerprint)                        AS unweighted_containment,
-    roaring_histogram_shape(h.hist_fp)                        AS shape
+    bf_histogram_shape(h.hist_fp)                        AS shape
 FROM sampled_histograms AS h
 CROSS JOIN domain_fingerprints AS d
-WHERE roaring_intersection_card(
-    roaring_histogram_bitmap(h.hist_fp), d.fingerprint) > 0
+WHERE bf_intersection_card(
+    bf_histogram_bitmap(h.hist_fp), d.fingerprint) > 0
 ORDER BY h.column_name, weighted_containment DESC;
