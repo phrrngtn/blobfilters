@@ -4,7 +4,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "blobfilters-sqlite"
-version = "0.2.1"
+version = "0.2.3"
 description = "bitset fingerprinting with Roaring bitmaps — Sqlite extension"
 requires-python = ">=3.8"
 license = {text = "MIT"}

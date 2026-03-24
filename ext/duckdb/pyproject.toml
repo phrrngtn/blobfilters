@@ -4,7 +4,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "blobfilters-duckdb"
-version = "0.2.2"
+version = "0.2.3"
 description = "bitset fingerprinting with Roaring bitmaps — Duckdb extension"
 requires-python = ">=3.8"
 license = {text = "MIT"}
