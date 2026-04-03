@@ -748,6 +748,12 @@ static void bf_contains_func(duckdb_function_info info,
     uint64_t *val1 = duckdb_vector_get_validity(vec1);
     bool *result_data = (bool *)duckdb_vector_get_data(output);
 
+    /* Cache: when the bitmap argument is constant across the chunk
+     * (common in joins), deserialize once and reuse. */
+    rfp_bitmap *cached_bm = NULL;
+    const char *cached_ptr = NULL;
+    uint32_t cached_len = 0;
+
     for (idx_t row = 0; row < size; row++) {
         if (!duckdb_validity_row_is_valid(val0, row) ||
             !duckdb_validity_row_is_valid(val1, row)) {
@@ -756,11 +762,18 @@ static void bf_contains_func(duckdb_function_info info,
         }
         uint32_t len;
         const char *blob = str_ptr(&data0[row], &len);
-        rfp_bitmap *bm = rfp_deserialize(blob, len);
-        if (!bm) { result_data[row] = false; continue; }
-        result_data[row] = rfp_contains(bm, data1[row]);
-        rfp_free(bm);
+
+        /* Reuse cached bitmap if same blob pointer and length */
+        if (blob != cached_ptr || len != cached_len) {
+            if (cached_bm) rfp_free(cached_bm);
+            cached_bm = rfp_deserialize(blob, len);
+            cached_ptr = blob;
+            cached_len = len;
+        }
+        if (!cached_bm) { result_data[row] = false; continue; }
+        result_data[row] = rfp_contains(cached_bm, data1[row]);
     }
+    if (cached_bm) rfp_free(cached_bm);
 }
 
 /* ── Register all functions ──────────────────────────────────────── */
