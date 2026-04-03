@@ -666,6 +666,35 @@ extern "C" {
 #endif
 
 /* ========================================================================
+ *   bf_hash(text TEXT) -> INTEGER (FNV-1a hash)
+ * ======================================================================== */
+
+static void sqlite_roaring_hash(sqlite3_context *ctx, int argc, sqlite3_value **argv) {
+    if (argc != 1 || sqlite3_value_type(argv[0]) == SQLITE_NULL) {
+        sqlite3_result_null(ctx);
+        return;
+    }
+    const char *text = reinterpret_cast<const char *>(sqlite3_value_text(argv[0]));
+    int len = sqlite3_value_bytes(argv[0]);
+    sqlite3_result_int64(ctx, static_cast<sqlite3_int64>(rfp_fnv1a(text, len)));
+}
+
+/* ========================================================================
+ *   bf_hash_normalized(text TEXT) -> INTEGER (normalized FNV-1a hash)
+ * ======================================================================== */
+
+static void sqlite_roaring_hash_normalized(sqlite3_context *ctx, int argc, sqlite3_value **argv) {
+    if (argc != 1 || sqlite3_value_type(argv[0]) == SQLITE_NULL) {
+        sqlite3_result_null(ctx);
+        return;
+    }
+    const char *text = reinterpret_cast<const char *>(sqlite3_value_text(argv[0]));
+    int len = sqlite3_value_bytes(argv[0]);
+    sqlite3_result_int64(ctx, static_cast<sqlite3_int64>(
+        rfp_fnv1a_normalized(text, len, RFP_NORM_CASEFOLD)));
+}
+
+/* ========================================================================
  *   bf_to_array(bitmap BLOB) -> TEXT (JSON array of uint32)
  * ======================================================================== */
 
@@ -823,6 +852,12 @@ int sqlite3_roaring_init(sqlite3 *db, char **pzErrMsg, const sqlite3_api_routine
                             nullptr, sqlite_histogram_shape, nullptr, nullptr);
     sqlite3_create_function(db, "bf_histogram_similarity", 2, SQLITE_UTF8 | SQLITE_DETERMINISTIC,
                             nullptr, sqlite_histogram_similarity, nullptr, nullptr);
+
+    /* Hash functions */
+    sqlite3_create_function(db, "bf_hash", 1, SQLITE_UTF8 | SQLITE_DETERMINISTIC,
+                            nullptr, sqlite_roaring_hash, nullptr, nullptr);
+    sqlite3_create_function(db, "bf_hash_normalized", 1, SQLITE_UTF8 | SQLITE_DETERMINISTIC,
+                            nullptr, sqlite_roaring_hash_normalized, nullptr, nullptr);
 
     /* Array conversion */
     sqlite3_create_function(db, "bf_to_array", 1, SQLITE_UTF8 | SQLITE_DETERMINISTIC,

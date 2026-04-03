@@ -203,6 +203,22 @@ void rfp_add_hash_normalized(rfp_bitmap *bm, const void *data, size_t len,
     }
 }
 
+/* ========================================================================
+ * Public hash functions (after normalize_casefold is defined)
+ * ======================================================================== */
+
+uint32_t rfp_fnv1a(const void *data, size_t len) {
+    return fnv1a(data, len);
+}
+
+uint32_t rfp_fnv1a_normalized(const void *data, size_t len, rfp_norm_mode mode) {
+    if (mode & RFP_NORM_CASEFOLD) {
+        std::string norm = normalize_casefold(data, len);
+        return fnv1a(norm.data(), norm.size());
+    }
+    return fnv1a(data, len);
+}
+
 int rfp_add_json_array(rfp_bitmap *bm, const char *json_str, size_t json_len) {
     if (!bm || !bm->roaring || !json_str) return -1;
 

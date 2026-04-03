@@ -29,6 +29,10 @@ rfp_bitmap *rfp_create(void);
 rfp_bitmap *rfp_copy(const rfp_bitmap *bm);
 void        rfp_free(rfp_bitmap *bm);
 
+/* Hash functions (FNV-1a) — exposed for direct use */
+uint32_t rfp_fnv1a(const void *data, size_t len);
+uint32_t rfp_fnv1a_normalized(const void *data, size_t len, rfp_norm_mode mode);
+
 /* Add values */
 void rfp_add_uint32(rfp_bitmap *bm, uint32_t val);
 void rfp_add_hash(rfp_bitmap *bm, const void *data, size_t len);  /* FNV-1a -> add */

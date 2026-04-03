@@ -603,6 +603,44 @@ static void bf_histogram_similarity_func(duckdb_function_info info,
     }
 }
 
+/* ── bf_hash(text VARCHAR) -> UINTEGER ────────────────────────────── */
+
+static void bf_hash_func(duckdb_function_info info,
+                          duckdb_data_chunk input,
+                          duckdb_vector output) {
+    idx_t size = duckdb_data_chunk_get_size(input);
+    duckdb_vector vec0 = duckdb_data_chunk_get_vector(input, 0);
+    duckdb_string_t *data0 = (duckdb_string_t *)duckdb_vector_get_data(vec0);
+    uint64_t *val0 = duckdb_vector_get_validity(vec0);
+    uint32_t *result_data = (uint32_t *)duckdb_vector_get_data(output);
+
+    for (idx_t row = 0; row < size; row++) {
+        CHECK_NULL_1(row);
+        uint32_t len;
+        const char *str = str_ptr(&data0[row], &len);
+        result_data[row] = rfp_fnv1a(str, len);
+    }
+}
+
+/* ── bf_hash_normalized(text VARCHAR) -> UINTEGER ────────────────── */
+
+static void bf_hash_normalized_func(duckdb_function_info info,
+                                     duckdb_data_chunk input,
+                                     duckdb_vector output) {
+    idx_t size = duckdb_data_chunk_get_size(input);
+    duckdb_vector vec0 = duckdb_data_chunk_get_vector(input, 0);
+    duckdb_string_t *data0 = (duckdb_string_t *)duckdb_vector_get_data(vec0);
+    uint64_t *val0 = duckdb_vector_get_validity(vec0);
+    uint32_t *result_data = (uint32_t *)duckdb_vector_get_data(output);
+
+    for (idx_t row = 0; row < size; row++) {
+        CHECK_NULL_1(row);
+        uint32_t len;
+        const char *str = str_ptr(&data0[row], &len);
+        result_data[row] = rfp_fnv1a_normalized(str, len, RFP_NORM_CASEFOLD);
+    }
+}
+
 /* ── bf_to_array(blob BLOB) -> UINTEGER[] ────────────────────────── */
 
 static void bf_to_array_func(duckdb_function_info info,
@@ -732,6 +770,30 @@ static void register_functions(duckdb_connection connection) {
     duckdb_logical_type blob_type    = duckdb_create_logical_type(DUCKDB_TYPE_BLOB);
     duckdb_logical_type ubigint_type = duckdb_create_logical_type(DUCKDB_TYPE_UBIGINT);
     duckdb_logical_type double_type  = duckdb_create_logical_type(DUCKDB_TYPE_DOUBLE);
+
+    duckdb_logical_type uint_type = duckdb_create_logical_type(DUCKDB_TYPE_UINTEGER);
+
+    /* bf_hash(text VARCHAR) -> UINTEGER */
+    {
+        duckdb_scalar_function f = duckdb_create_scalar_function();
+        duckdb_scalar_function_set_name(f, "bf_hash");
+        duckdb_scalar_function_add_parameter(f, varchar_type);
+        duckdb_scalar_function_set_return_type(f, uint_type);
+        duckdb_scalar_function_set_function(f, bf_hash_func);
+        duckdb_register_scalar_function(connection, f);
+        duckdb_destroy_scalar_function(&f);
+    }
+
+    /* bf_hash_normalized(text VARCHAR) -> UINTEGER */
+    {
+        duckdb_scalar_function f = duckdb_create_scalar_function();
+        duckdb_scalar_function_set_name(f, "bf_hash_normalized");
+        duckdb_scalar_function_add_parameter(f, varchar_type);
+        duckdb_scalar_function_set_return_type(f, uint_type);
+        duckdb_scalar_function_set_function(f, bf_hash_normalized_func);
+        duckdb_register_scalar_function(connection, f);
+        duckdb_destroy_scalar_function(&f);
+    }
 
     /* bf_build_json(json VARCHAR) -> BLOB */
     {
@@ -908,7 +970,6 @@ static void register_functions(duckdb_connection connection) {
 
     /* bf_to_array(blob BLOB) -> UINTEGER[] */
     {
-        duckdb_logical_type uint_type = duckdb_create_logical_type(DUCKDB_TYPE_UINTEGER);
         duckdb_logical_type list_type = duckdb_create_list_type(uint_type);
         duckdb_scalar_function f = duckdb_create_scalar_function();
         duckdb_scalar_function_set_name(f, "bf_to_array");
@@ -918,12 +979,10 @@ static void register_functions(duckdb_connection connection) {
         duckdb_register_scalar_function(connection, f);
         duckdb_destroy_scalar_function(&f);
         duckdb_destroy_logical_type(&list_type);
-        duckdb_destroy_logical_type(&uint_type);
     }
 
     /* bf_from_array(arr UINTEGER[]) -> BLOB */
     {
-        duckdb_logical_type uint_type = duckdb_create_logical_type(DUCKDB_TYPE_UINTEGER);
         duckdb_logical_type list_type = duckdb_create_list_type(uint_type);
         duckdb_scalar_function f = duckdb_create_scalar_function();
         duckdb_scalar_function_set_name(f, "bf_from_array");
@@ -933,12 +992,10 @@ static void register_functions(duckdb_connection connection) {
         duckdb_register_scalar_function(connection, f);
         duckdb_destroy_scalar_function(&f);
         duckdb_destroy_logical_type(&list_type);
-        duckdb_destroy_logical_type(&uint_type);
     }
 
     /* bf_contains(bitmap BLOB, value UINTEGER) -> BOOLEAN */
     {
-        duckdb_logical_type uint_type = duckdb_create_logical_type(DUCKDB_TYPE_UINTEGER);
         duckdb_logical_type bool_type = duckdb_create_logical_type(DUCKDB_TYPE_BOOLEAN);
         duckdb_scalar_function f = duckdb_create_scalar_function();
         duckdb_scalar_function_set_name(f, "bf_contains");
@@ -949,9 +1006,9 @@ static void register_functions(duckdb_connection connection) {
         duckdb_register_scalar_function(connection, f);
         duckdb_destroy_scalar_function(&f);
         duckdb_destroy_logical_type(&bool_type);
-        duckdb_destroy_logical_type(&uint_type);
     }
 
+    duckdb_destroy_logical_type(&uint_type);
     duckdb_destroy_logical_type(&varchar_type);
     duckdb_destroy_logical_type(&blob_type);
     duckdb_destroy_logical_type(&ubigint_type);
