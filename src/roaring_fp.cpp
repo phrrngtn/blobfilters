@@ -311,6 +311,34 @@ void rfp_or_inplace(rfp_bitmap *dst, const rfp_bitmap *src) {
 }
 
 /* ========================================================================
+ * Array conversion
+ * ======================================================================== */
+
+uint64_t rfp_to_uint32_array(const rfp_bitmap *bm, uint32_t *buf, uint64_t buf_len) {
+    if (!bm || !bm->roaring || !buf) return 0;
+    uint64_t card = roaring_bitmap_get_cardinality(bm->roaring);
+    if (card > buf_len) card = buf_len;
+    roaring_bitmap_to_uint32_array(bm->roaring, buf);
+    return card;
+}
+
+rfp_bitmap *rfp_from_uint32_array(const uint32_t *vals, uint64_t count) {
+    if (!vals || count == 0) return rfp_create();
+    rfp_bitmap *bm = rfp_create();
+    if (!bm) return nullptr;
+    for (uint64_t i = 0; i < count; i++) {
+        roaring_bitmap_add(bm->roaring, vals[i]);
+    }
+    roaring_bitmap_run_optimize(bm->roaring);
+    return bm;
+}
+
+int rfp_contains(const rfp_bitmap *bm, uint32_t val) {
+    if (!bm || !bm->roaring) return 0;
+    return roaring_bitmap_contains(bm->roaring, val) ? 1 : 0;
+}
+
+/* ========================================================================
  * Metrics
  * ======================================================================== */
 

@@ -23,6 +23,8 @@ SQLITE_EXTENSION_INIT1
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string>
+#include <nlohmann/json.hpp>
 
 /* ========================================================================
  *   bf_build(value) -> BLOB   [aggregate]
@@ -663,6 +665,118 @@ static void sqlite_histogram_similarity(sqlite3_context *ctx, int argc, sqlite3_
 extern "C" {
 #endif
 
+/* ========================================================================
+ *   bf_to_array(bitmap BLOB) -> TEXT (JSON array of uint32)
+ * ======================================================================== */
+
+static void sqlite_roaring_to_array(sqlite3_context *ctx, int argc, sqlite3_value **argv) {
+    if (argc != 1 || sqlite3_value_type(argv[0]) == SQLITE_NULL) {
+        sqlite3_result_null(ctx);
+        return;
+    }
+
+    bool owned;
+    rfp_bitmap *bm = get_cached_bitmap(ctx, 0, argv, &owned);
+    if (!bm) { sqlite3_result_text(ctx, "[]", 2, SQLITE_STATIC); return; }
+
+    uint64_t card = rfp_cardinality(bm);
+    if (card == 0) {
+        if (owned) rfp_free(bm);
+        sqlite3_result_text(ctx, "[]", 2, SQLITE_STATIC);
+        return;
+    }
+
+    uint32_t *arr = static_cast<uint32_t *>(sqlite3_malloc64(card * sizeof(uint32_t)));
+    if (!arr) {
+        if (owned) rfp_free(bm);
+        sqlite3_result_error_nomem(ctx);
+        return;
+    }
+    rfp_to_uint32_array(bm, arr, card);
+    if (owned) rfp_free(bm);
+
+    /* Build JSON array string */
+    std::string json = "[";
+    for (uint64_t i = 0; i < card; i++) {
+        if (i > 0) json += ',';
+        json += std::to_string(arr[i]);
+    }
+    json += ']';
+    sqlite3_free(arr);
+
+    char *result = static_cast<char *>(sqlite3_malloc64(json.size() + 1));
+    if (!result) { sqlite3_result_error_nomem(ctx); return; }
+    memcpy(result, json.data(), json.size());
+    result[json.size()] = '\0';
+    sqlite3_result_text(ctx, result, static_cast<int>(json.size()), sqlite3_free);
+}
+
+/* ========================================================================
+ *   bf_from_array(json TEXT) -> BLOB
+ *   Accepts a JSON array of unsigned integers: [1, 42, 1000]
+ * ======================================================================== */
+
+static void sqlite_roaring_from_array(sqlite3_context *ctx, int argc, sqlite3_value **argv) {
+    if (argc != 1 || sqlite3_value_type(argv[0]) == SQLITE_NULL) {
+        sqlite3_result_null(ctx);
+        return;
+    }
+
+    const char *json = reinterpret_cast<const char *>(sqlite3_value_text(argv[0]));
+    int json_len = sqlite3_value_bytes(argv[0]);
+    if (!json || json_len <= 0) { sqlite3_result_null(ctx); return; }
+
+    /* Parse JSON array of integers using nlohmann::json */
+    nlohmann::json j;
+    try {
+        j = nlohmann::json::parse(json, json + json_len);
+    } catch (...) {
+        sqlite3_result_error(ctx, "bf_from_array: invalid JSON", -1);
+        return;
+    }
+    if (!j.is_array()) {
+        sqlite3_result_error(ctx, "bf_from_array: expected JSON array", -1);
+        return;
+    }
+
+    rfp_bitmap *bm = rfp_create();
+    if (!bm) { sqlite3_result_error_nomem(ctx); return; }
+
+    for (const auto &elem : j) {
+        if (elem.is_number_unsigned() || elem.is_number_integer()) {
+            rfp_add_uint32(bm, static_cast<uint32_t>(elem.get<uint64_t>()));
+        }
+    }
+
+    size_t sz = rfp_serialized_size(bm);
+    char *buf = static_cast<char *>(sqlite3_malloc64(sz));
+    if (!buf) { rfp_free(bm); sqlite3_result_error_nomem(ctx); return; }
+    rfp_serialize(bm, buf, sz);
+    rfp_free(bm);
+    sqlite3_result_blob(ctx, buf, static_cast<int>(sz), sqlite3_free);
+}
+
+/* ========================================================================
+ *   bf_contains(bitmap BLOB, value INTEGER) -> BOOLEAN
+ * ======================================================================== */
+
+static void sqlite_roaring_contains(sqlite3_context *ctx, int argc, sqlite3_value **argv) {
+    if (argc != 2 || sqlite3_value_type(argv[0]) == SQLITE_NULL
+                   || sqlite3_value_type(argv[1]) == SQLITE_NULL) {
+        sqlite3_result_null(ctx);
+        return;
+    }
+
+    bool owned;
+    rfp_bitmap *bm = get_cached_bitmap(ctx, 0, argv, &owned);
+    if (!bm) { sqlite3_result_int(ctx, 0); return; }
+
+    uint32_t val = static_cast<uint32_t>(sqlite3_value_int64(argv[1]));
+    sqlite3_result_int(ctx, rfp_contains(bm, val));
+    if (owned) rfp_free(bm);
+}
+
+
 #ifdef _WIN32
 __declspec(dllexport)
 #endif
@@ -709,6 +823,14 @@ int sqlite3_roaring_init(sqlite3 *db, char **pzErrMsg, const sqlite3_api_routine
                             nullptr, sqlite_histogram_shape, nullptr, nullptr);
     sqlite3_create_function(db, "bf_histogram_similarity", 2, SQLITE_UTF8 | SQLITE_DETERMINISTIC,
                             nullptr, sqlite_histogram_similarity, nullptr, nullptr);
+
+    /* Array conversion */
+    sqlite3_create_function(db, "bf_to_array", 1, SQLITE_UTF8 | SQLITE_DETERMINISTIC,
+                            nullptr, sqlite_roaring_to_array, nullptr, nullptr);
+    sqlite3_create_function(db, "bf_from_array", 1, SQLITE_UTF8 | SQLITE_DETERMINISTIC,
+                            nullptr, sqlite_roaring_from_array, nullptr, nullptr);
+    sqlite3_create_function(db, "bf_contains", 2, SQLITE_UTF8 | SQLITE_DETERMINISTIC,
+                            nullptr, sqlite_roaring_contains, nullptr, nullptr);
 
     return SQLITE_OK;
 }

@@ -59,6 +59,16 @@ rfp_bitmap *rfp_from_base64(const char *b64, size_t len);
 /* Set operations */
 void rfp_or_inplace(rfp_bitmap *dst, const rfp_bitmap *src);
 
+/* Array conversion: expand bitmap to sorted uint32 array / build from array */
+/* Returns number of elements written. Caller provides buf of at least
+ * rfp_cardinality(bm) uint32_t slots. */
+uint64_t rfp_to_uint32_array(const rfp_bitmap *bm, uint32_t *buf, uint64_t buf_len);
+/* Build bitmap from array of uint32 values. */
+rfp_bitmap *rfp_from_uint32_array(const uint32_t *vals, uint64_t count);
+
+/* Membership test */
+int rfp_contains(const rfp_bitmap *bm, uint32_t val);
+
 /* Metrics */
 uint64_t rfp_cardinality(const rfp_bitmap *bm);
 uint64_t rfp_intersection_card(const rfp_bitmap *a, const rfp_bitmap *b);

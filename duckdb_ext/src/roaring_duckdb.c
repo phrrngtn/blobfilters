@@ -603,6 +603,128 @@ static void bf_histogram_similarity_func(duckdb_function_info info,
     }
 }
 
+/* ── bf_to_array(blob BLOB) -> UINTEGER[] ────────────────────────── */
+
+static void bf_to_array_func(duckdb_function_info info,
+                              duckdb_data_chunk input,
+                              duckdb_vector output) {
+    idx_t size = duckdb_data_chunk_get_size(input);
+    duckdb_vector vec0 = duckdb_data_chunk_get_vector(input, 0);
+    duckdb_string_t *data0 = (duckdb_string_t *)duckdb_vector_get_data(vec0);
+    uint64_t *val0 = duckdb_vector_get_validity(vec0);
+
+    duckdb_list_entry *entries = (duckdb_list_entry *)duckdb_vector_get_data(output);
+    duckdb_vector child = duckdb_list_vector_get_child(output);
+
+    idx_t total_elements = 0;
+
+    /* First pass: count total elements to reserve space */
+    for (idx_t row = 0; row < size; row++) {
+        if (!duckdb_validity_row_is_valid(val0, row)) {
+            entries[row].offset = total_elements;
+            entries[row].length = 0;
+            continue;
+        }
+        uint32_t len;
+        const char *blob = str_ptr(&data0[row], &len);
+        rfp_bitmap *bm = rfp_deserialize(blob, len);
+        uint64_t card = bm ? rfp_cardinality(bm) : 0;
+        entries[row].offset = total_elements;
+        entries[row].length = card;
+        total_elements += card;
+        if (bm) rfp_free(bm);
+    }
+
+    duckdb_list_vector_reserve(output, total_elements);
+    duckdb_list_vector_set_size(output, total_elements);
+    uint32_t *child_data = (uint32_t *)duckdb_vector_get_data(child);
+
+    /* Second pass: fill child data */
+    for (idx_t row = 0; row < size; row++) {
+        if (!duckdb_validity_row_is_valid(val0, row) || entries[row].length == 0)
+            continue;
+        uint32_t len;
+        const char *blob = str_ptr(&data0[row], &len);
+        rfp_bitmap *bm = rfp_deserialize(blob, len);
+        if (bm) {
+            rfp_to_uint32_array(bm, child_data + entries[row].offset,
+                                entries[row].length);
+            rfp_free(bm);
+        }
+    }
+}
+
+/* ── bf_from_array(arr UINTEGER[]) -> BLOB ───────────────────────── */
+
+static void bf_from_array_func(duckdb_function_info info,
+                                duckdb_data_chunk input,
+                                duckdb_vector output) {
+    idx_t size = duckdb_data_chunk_get_size(input);
+    duckdb_vector vec0 = duckdb_data_chunk_get_vector(input, 0);
+    duckdb_list_entry *list_entries = (duckdb_list_entry *)duckdb_vector_get_data(vec0);
+    uint64_t *val0 = duckdb_vector_get_validity(vec0);
+    duckdb_vector child = duckdb_list_vector_get_child(vec0);
+    uint32_t *child_data = (uint32_t *)duckdb_vector_get_data(child);
+
+    for (idx_t row = 0; row < size; row++) {
+        if (!duckdb_validity_row_is_valid(val0, row)) {
+            duckdb_validity_set_row_invalid(
+                duckdb_vector_get_validity(output), row);
+            continue;
+        }
+        duckdb_list_entry entry = list_entries[row];
+        rfp_bitmap *bm = rfp_from_uint32_array(
+            child_data + entry.offset, entry.length);
+        if (!bm) {
+            duckdb_validity_set_row_invalid(
+                duckdb_vector_get_validity(output), row);
+            continue;
+        }
+        size_t sz = rfp_serialized_size(bm);
+        char *buf = (char *)malloc(sz);
+        if (!buf) {
+            rfp_free(bm);
+            duckdb_validity_set_row_invalid(
+                duckdb_vector_get_validity(output), row);
+            continue;
+        }
+        rfp_serialize(bm, buf, sz);
+        rfp_free(bm);
+
+        duckdb_vector_assign_string_element_len(output, row, buf, sz);
+        free(buf);
+    }
+}
+
+/* ── bf_contains(bitmap BLOB, value UINTEGER) -> BOOLEAN ─────────── */
+
+static void bf_contains_func(duckdb_function_info info,
+                              duckdb_data_chunk input,
+                              duckdb_vector output) {
+    idx_t size = duckdb_data_chunk_get_size(input);
+    duckdb_vector vec0 = duckdb_data_chunk_get_vector(input, 0);
+    duckdb_vector vec1 = duckdb_data_chunk_get_vector(input, 1);
+    duckdb_string_t *data0 = (duckdb_string_t *)duckdb_vector_get_data(vec0);
+    uint32_t *data1 = (uint32_t *)duckdb_vector_get_data(vec1);
+    uint64_t *val0 = duckdb_vector_get_validity(vec0);
+    uint64_t *val1 = duckdb_vector_get_validity(vec1);
+    bool *result_data = (bool *)duckdb_vector_get_data(output);
+
+    for (idx_t row = 0; row < size; row++) {
+        if (!duckdb_validity_row_is_valid(val0, row) ||
+            !duckdb_validity_row_is_valid(val1, row)) {
+            result_data[row] = false;
+            continue;
+        }
+        uint32_t len;
+        const char *blob = str_ptr(&data0[row], &len);
+        rfp_bitmap *bm = rfp_deserialize(blob, len);
+        if (!bm) { result_data[row] = false; continue; }
+        result_data[row] = rfp_contains(bm, data1[row]);
+        rfp_free(bm);
+    }
+}
+
 /* ── Register all functions ──────────────────────────────────────── */
 
 static void register_functions(duckdb_connection connection) {
@@ -782,6 +904,52 @@ static void register_functions(duckdb_connection connection) {
         duckdb_scalar_function_set_function(f, bf_histogram_similarity_func);
         duckdb_register_scalar_function(connection, f);
         duckdb_destroy_scalar_function(&f);
+    }
+
+    /* bf_to_array(blob BLOB) -> UINTEGER[] */
+    {
+        duckdb_logical_type uint_type = duckdb_create_logical_type(DUCKDB_TYPE_UINTEGER);
+        duckdb_logical_type list_type = duckdb_create_list_type(uint_type);
+        duckdb_scalar_function f = duckdb_create_scalar_function();
+        duckdb_scalar_function_set_name(f, "bf_to_array");
+        duckdb_scalar_function_add_parameter(f, blob_type);
+        duckdb_scalar_function_set_return_type(f, list_type);
+        duckdb_scalar_function_set_function(f, bf_to_array_func);
+        duckdb_register_scalar_function(connection, f);
+        duckdb_destroy_scalar_function(&f);
+        duckdb_destroy_logical_type(&list_type);
+        duckdb_destroy_logical_type(&uint_type);
+    }
+
+    /* bf_from_array(arr UINTEGER[]) -> BLOB */
+    {
+        duckdb_logical_type uint_type = duckdb_create_logical_type(DUCKDB_TYPE_UINTEGER);
+        duckdb_logical_type list_type = duckdb_create_list_type(uint_type);
+        duckdb_scalar_function f = duckdb_create_scalar_function();
+        duckdb_scalar_function_set_name(f, "bf_from_array");
+        duckdb_scalar_function_add_parameter(f, list_type);
+        duckdb_scalar_function_set_return_type(f, blob_type);
+        duckdb_scalar_function_set_function(f, bf_from_array_func);
+        duckdb_register_scalar_function(connection, f);
+        duckdb_destroy_scalar_function(&f);
+        duckdb_destroy_logical_type(&list_type);
+        duckdb_destroy_logical_type(&uint_type);
+    }
+
+    /* bf_contains(bitmap BLOB, value UINTEGER) -> BOOLEAN */
+    {
+        duckdb_logical_type uint_type = duckdb_create_logical_type(DUCKDB_TYPE_UINTEGER);
+        duckdb_logical_type bool_type = duckdb_create_logical_type(DUCKDB_TYPE_BOOLEAN);
+        duckdb_scalar_function f = duckdb_create_scalar_function();
+        duckdb_scalar_function_set_name(f, "bf_contains");
+        duckdb_scalar_function_add_parameter(f, blob_type);
+        duckdb_scalar_function_add_parameter(f, uint_type);
+        duckdb_scalar_function_set_return_type(f, bool_type);
+        duckdb_scalar_function_set_function(f, bf_contains_func);
+        duckdb_register_scalar_function(connection, f);
+        duckdb_destroy_scalar_function(&f);
+        duckdb_destroy_logical_type(&bool_type);
+        duckdb_destroy_logical_type(&uint_type);
     }
 
     duckdb_destroy_logical_type(&varchar_type);
