@@ -95,7 +95,7 @@ if(BUILD_SQLITE_EXTENSION)
     )
     set_target_properties(roaring_sqlite PROPERTIES
         PREFIX ""
-        OUTPUT_NAME "roaring"
+        OUTPUT_NAME "blobfilters"
     )
 
     if(APPLE)
@@ -174,4 +174,20 @@ if(BUILD_TESTS)
     add_executable(fingerprint_demo demo/fingerprint_demo.c)
     target_link_libraries(fingerprint_demo roaring_fp)
     target_include_directories(fingerprint_demo PRIVATE ${CMAKE_SOURCE_DIR}/include)
+endif()
+
+#===--------------------------------------------------------------------===
+# Stage extensions into ext/ package directories for wheel builds.
+# After `cmake --build build`, run `cmake --install build` to copy
+# the built extensions so that `uv pip install ext/duckdb/` works.
+#===--------------------------------------------------------------------===
+
+if(BUILD_DUCKDB_EXTENSION)
+    install(FILES "${CMAKE_BINARY_DIR}/duckdb/blobfilters.duckdb_extension"
+            DESTINATION "${CMAKE_SOURCE_DIR}/ext/duckdb/blobfilters_duckdb/")
+endif()
+
+if(BUILD_SQLITE_EXTENSION)
+    install(FILES "$<TARGET_FILE:roaring_sqlite>"
+            DESTINATION "${CMAKE_SOURCE_DIR}/ext/sqlite/blobfilters_sqlite/")
 endif()

@@ -809,7 +809,7 @@ static void sqlite_roaring_contains(sqlite3_context *ctx, int argc, sqlite3_valu
 #ifdef _WIN32
 __declspec(dllexport)
 #endif
-int sqlite3_roaring_init(sqlite3 *db, char **pzErrMsg, const sqlite3_api_routines *pApi) {
+int sqlite3_blobfilters_init(sqlite3 *db, char **pzErrMsg, const sqlite3_api_routines *pApi) {
     SQLITE_EXTENSION_INIT2(pApi);
     (void)pzErrMsg;
 

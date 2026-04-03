@@ -1,16 +1,19 @@
 [build-system]
-requires = ["scikit-build-core>=0.5"]
-build-backend = "scikit_build_core.build"
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "blobfilters-sqlite"
 version = "0.2.3"
-description = "bitset fingerprinting with Roaring bitmaps — Sqlite extension"
+description = "Roaring bitmap fingerprinting — SQLite extension"
 requires-python = ">=3.8"
 license = {text = "MIT"}
 authors = [{name = "Paul Harrington"}]
 dependencies = []
 
-[tool.scikit-build]
-wheel.packages = ["blobfilters_sqlite"]
-sdist.include = ["src/**", "include/**", "sqlite_ext/**", "third_party/**"]
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["blobfilters_sqlite"]
+
+[tool.setuptools.package-data]
+blobfilters_sqlite = ["*.so", "*.dylib", "*.dll"]

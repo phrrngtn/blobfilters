@@ -12,7 +12,7 @@
 #include <string.h>
 
 /* Our extension init — linked statically */
-extern int sqlite3_roaring_init(sqlite3 *db, char **pzErrMsg,
+extern int sqlite3_blobfilters_init(sqlite3 *db, char **pzErrMsg,
                                 const sqlite3_api_routines *pApi);
 
 static void exec(sqlite3 *db, const char *sql, const char *label) {
@@ -79,7 +79,7 @@ int main(void) {
     }
 
     /* Register our roaring functions */
-    sqlite3_roaring_init(db, NULL, NULL);
+    sqlite3_blobfilters_init(db, NULL, NULL);
 
     printf("=================================================================\n");
     printf("  SQLite Domain Fingerprint Demo\n");
