@@ -108,9 +108,30 @@ cmake -B build \
 
 See [DESIGN.md](DESIGN.md) for the full vision: universal catalog schema, page classification pipeline, histogram triage, FK discovery, and query inversion.
 
-## Origins
+## Acknowledgements
 
-Based on [oldmoe/roaringlite](https://github.com/oldmoe/roaringlite), a SQLite extension for CRoaring bitmap operations. blobfilters adds domain fingerprinting (containment/Jaccard probing), the blob extension build pattern (shared C core + DuckDB and Python bindings), and the [rbloom](https://github.com/KenanHanke/rbloom) Bloom filter library was a reference point during early evaluation of probabilistic set membership approaches.
+Built on [CRoaring](https://github.com/RoaringBitmap/CRoaring) (Lemire
+et al., 2018), a C/C++ implementation of Roaring Bitmaps — compressed
+bitmap data structures for fast set operations.
+
+> Chambi, S., Lemire, D., Kaser, O. and Godin, R. (2016). Better bitmap
+> performance with Roaring bitmaps. *Software: Practice and Experience*,
+> 46(5), 709–719. doi:[10.1002/spe.2325](https://doi.org/10.1002/spe.2325)
+
+CRoaring is distributed under the Apache 2.0 / MIT dual license.
+
+The SQLite extension pattern originates from
+[oldmoe/roaringlite](https://github.com/oldmoe/roaringlite).
+blobfilters adds domain fingerprinting (containment/Jaccard probing),
+the blob extension build pattern (shared C core + DuckDB and Python
+bindings), and JSON/base64 serialization.
+
+The [rbloom](https://github.com/KenanHanke/rbloom) Bloom filter library
+was a reference point during early evaluation of probabilistic set
+membership approaches.
+
+The FNV-1a hash function follows the specification at
+http://www.isthe.com/chongo/tech/comp/fnv/.
 
 ## License
 
