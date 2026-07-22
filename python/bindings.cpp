@@ -206,6 +206,10 @@ NB_MODULE(_core, m) {
         if (js) rfp_free_string(js);
         return s;
     }, "The feature registry as JSON, for interning");
+    m.def("cc_eval", [](uint64_t sig, const std::string &expr) -> nb::object {
+        int v = rfp_cc_eval(sig, expr.c_str());
+        return v < 0 ? nb::none() : nb::cast(v != 0);
+    }, "Evaluate a boolean feature-expression against a signature (None on error)");
     m.def("from_blob", &from_blob, "Deserialize a bitmap from bytes");
     m.def("from_base64", &from_base64, "Deserialize a bitmap from base64 string");
     m.def("from_json", &from_json, "Build a bitmap from a JSON array of strings");

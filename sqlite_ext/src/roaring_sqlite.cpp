@@ -144,6 +144,14 @@ static void sqlite_cc_features_json(sqlite3_context *ctx, int, sqlite3_value **)
     if (js) { sqlite3_result_text(ctx, js, -1, SQLITE_TRANSIENT); rfp_free_string(js); }
     else sqlite3_result_null(ctx);
 }
+/* bf_cc_eval(sig, expr) -> 1/0; NULL on unknown name or syntax error. */
+static void sqlite_cc_eval(sqlite3_context *ctx, int argc, sqlite3_value **argv) {
+    if (argc != 2 || sqlite3_value_type(argv[0]) == SQLITE_NULL
+                  || sqlite3_value_type(argv[1]) == SQLITE_NULL) { sqlite3_result_null(ctx); return; }
+    uint64_t sig = (uint64_t)sqlite3_value_int64(argv[0]);
+    int v = rfp_cc_eval(sig, reinterpret_cast<const char *>(sqlite3_value_text(argv[1])));
+    if (v < 0) sqlite3_result_null(ctx); else sqlite3_result_int(ctx, v);
+}
 
 /* ========================================================================
  *   bf_build_json(json_array TEXT) -> BLOB
@@ -956,6 +964,8 @@ int sqlite3_blobfilters_init(sqlite3 *db, char **pzErrMsg, const sqlite3_api_rou
                             nullptr, sqlite_cc_feature_bit, nullptr, nullptr);
     sqlite3_create_function(db, "bf_cc_features_json", 0, SQLITE_UTF8 | SQLITE_DETERMINISTIC,
                             nullptr, sqlite_cc_features_json, nullptr, nullptr);
+    sqlite3_create_function(db, "bf_cc_eval", 2, SQLITE_UTF8 | SQLITE_DETERMINISTIC,
+                            nullptr, sqlite_cc_eval, nullptr, nullptr);
 
     sqlite3_create_function(db, "bf_build_json", 1, SQLITE_UTF8 | SQLITE_DETERMINISTIC,
                             nullptr, sqlite_roaring_build_json, nullptr, nullptr);

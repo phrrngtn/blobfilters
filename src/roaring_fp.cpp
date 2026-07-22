@@ -469,6 +469,102 @@ int rfp_cc_feature_bit(const char *name) {
     return -1;
 }
 
+/* -------- cc_eval: a boolean interpreter over the feature bits --------
+   Evaluates a user composite expressed over the FIXED vocabulary names against a
+   precomputed signature. Grammar (whitespace-insensitive):
+       expr := or ; or := xor ('|' xor)* ; xor := and ('^' and)* ;
+       and  := not ('&' not)* ; not := ('!'|'~') not | primary ;
+       primary := '(' expr ')' | name ; name := [A-Za-z0-9_]+
+   A name resolves via rfp_cc_feature_bit; an UNKNOWN name (broken FK / diverged
+   source) or any syntax error aborts to -1 — the same one-sided integrity signal
+   as bf_cc_feature_bit. No allocation; pure function of (sig, expr) so every
+   surface agrees and the result is soundly cacheable. Atoms 1/0, error -1.
+   User-land expands composite->composite DAGs to primitive-name exprs first; this
+   only ever sees vocabulary names. */
+namespace {
+struct CcEval {
+    const char *p;
+    uint64_t sig;
+    bool err = false;
+
+    void skip_ws() { while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++; }
+
+    /* '(' expr ')' | name */
+    int primary() {
+        skip_ws();
+        if (*p == '(') {
+            p++;
+            int v = parse_or();
+            skip_ws();
+            if (*p == ')') p++; else err = true;
+            return v;
+        }
+        char name[64];
+        size_t n = 0;
+        while ((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') ||
+               (*p >= '0' && *p <= '9') || *p == '_') {
+            if (n < sizeof(name) - 1) name[n++] = *p;
+            p++;
+        }
+        if (n == 0) { err = true; return 0; }
+        name[n] = '\0';
+        int bit = rfp_cc_feature_bit(name);
+        if (bit < 0) { err = true; return 0; }   /* unknown name = broken reference */
+        return (int)((sig >> bit) & 1u);
+    }
+
+    /* ('!'|'~') not | primary */
+    int parse_not() {
+        skip_ws();
+        if (*p == '!' || *p == '~') { p++; return parse_not() ? 0 : 1; }
+        return primary();
+    }
+
+    int parse_and() {
+        int v = parse_not();
+        for (;;) {
+            skip_ws();
+            if (*p == '&') { p++; int r = parse_not(); v = (v && r) ? 1 : 0; }
+            else break;
+        }
+        return v;
+    }
+
+    int parse_xor() {
+        int v = parse_and();
+        for (;;) {
+            skip_ws();
+            if (*p == '^') { p++; int r = parse_and(); v = (v ^ r) ? 1 : 0; }
+            else break;
+        }
+        return v;
+    }
+
+    int parse_or() {
+        int v = parse_xor();
+        for (;;) {
+            skip_ws();
+            if (*p == '|') { p++; int r = parse_xor(); v = (v || r) ? 1 : 0; }
+            else break;
+        }
+        return v;
+    }
+};
+} // namespace
+
+/* Evaluate a boolean feature-expression against a signature. 1/0, or -1 on
+   unknown name or syntax error. */
+int rfp_cc_eval(uint64_t sig, const char *expr) {
+    if (!expr) return -1;
+    CcEval e;
+    e.p = expr;
+    e.sig = sig;
+    int v = e.parse_or();
+    e.skip_ws();
+    if (e.err || *e.p != '\0') return -1;   /* trailing garbage = error */
+    return v;
+}
+
 /* The feature vocabulary is the FK target for user-land domain->feature tables;
    bump this (append-only!) whenever bits are added, never renumber/rename. */
 #define CC_VOCAB_VERSION 1

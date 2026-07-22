@@ -902,6 +902,37 @@ static void bf_cc_feature_bit_func(duckdb_function_info info,
     }
 }
 
+/* ── bf_cc_eval(sig UBIGINT, expr VARCHAR) -> BOOLEAN ────────────────
+   Evaluate a boolean feature-expression against a precomputed signature; NULL
+   when the expression references an unknown name or fails to parse (broken FK /
+   syntax error). Pairs with bf_cc_signature so composites-as-data run in SQL:
+   bf_cc_eval(bf_cc_signature(x), 'has_dollar & has_digit'). */
+static void bf_cc_eval_func(duckdb_function_info info,
+                            duckdb_data_chunk input,
+                            duckdb_vector output) {
+    (void)info;
+    idx_t size = duckdb_data_chunk_get_size(input);
+    duckdb_vector vec0 = duckdb_data_chunk_get_vector(input, 0);
+    duckdb_vector vec1 = duckdb_data_chunk_get_vector(input, 1);
+    uint64_t *data0 = (uint64_t *)duckdb_vector_get_data(vec0);
+    duckdb_string_t *data1 = (duckdb_string_t *)duckdb_vector_get_data(vec1);
+    uint64_t *val0 = duckdb_vector_get_validity(vec0);
+    uint64_t *val1 = duckdb_vector_get_validity(vec1);
+    bool *result_data = (bool *)duckdb_vector_get_data(output);
+    for (idx_t row = 0; row < size; row++) {
+        CHECK_NULL_2(row);
+        char *expr = str_dup_z(&data1[row]);
+        int v = rfp_cc_eval(data0[row], expr);
+        free(expr);
+        if (v < 0) {
+            duckdb_vector_ensure_validity_writable(output);
+            duckdb_validity_set_row_invalid(duckdb_vector_get_validity(output), row);
+            continue;
+        }
+        result_data[row] = (v != 0);
+    }
+}
+
 /* ── bf_cc_features_json() -> VARCHAR ────────────────────────────────
    Dump the whole feature registry as JSON, for interning into the host DB. */
 static void bf_cc_features_json_func(duckdb_function_info info,
@@ -1106,6 +1137,20 @@ static void register_functions(duckdb_connection connection) {
         duckdb_register_scalar_function(connection, f);
         duckdb_destroy_scalar_function(&f);
         duckdb_destroy_logical_type(&int_type);
+    }
+
+    /* bf_cc_eval(sig UBIGINT, expr VARCHAR) -> BOOLEAN */
+    {
+        duckdb_logical_type bool_type = duckdb_create_logical_type(DUCKDB_TYPE_BOOLEAN);
+        duckdb_scalar_function f = duckdb_create_scalar_function();
+        duckdb_scalar_function_set_name(f, "bf_cc_eval");
+        duckdb_scalar_function_add_parameter(f, ubigint_type);
+        duckdb_scalar_function_add_parameter(f, varchar_type);
+        duckdb_scalar_function_set_return_type(f, bool_type);
+        duckdb_scalar_function_set_function(f, bf_cc_eval_func);
+        duckdb_register_scalar_function(connection, f);
+        duckdb_destroy_scalar_function(&f);
+        duckdb_destroy_logical_type(&bool_type);
     }
 
     /* bf_cc_features_json() -> VARCHAR  (no args) */

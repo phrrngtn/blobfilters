@@ -516,6 +516,29 @@ int main(void) {
         rfp_free(bm_raw);
     }
 
+    printf("\n=== Test 23: cc_eval boolean feature-expressions ===\n");
+    {
+        uint64_t money = rfp_cc_signature("$1,234.56", 9);
+        uint64_t st    = rfp_cc_signature("CA", 2);
+        uint64_t code  = rfp_cc_signature("INV-0001", 8);
+        /* an expr reproduces the compiled-in composite exactly */
+        CHECK(rfp_cc_eval(money, "has_dollar & has_digit") == 1, "expr matches money");
+        CHECK(rfp_cc_eval(money, "money_shaped") == rfp_cc_eval(money, "has_dollar & has_digit"),
+              "money expr == compiled money_shaped bit");
+        CHECK(rfp_cc_eval(st, "all_upper & len_2") == 1, "state-like true for CA");
+        CHECK(rfp_cc_eval(code, "all_upper & len_2") == 0, "state-like false for INV-0001");
+        /* precedence, grouping, NOT, XOR */
+        CHECK(rfp_cc_eval(st, "!has_digit") == 1, "NOT unary");
+        CHECK(rfp_cc_eval(st, "has_upper & !has_lower | has_digit") == 1, "precedence: (u & !l) | d");
+        CHECK(rfp_cc_eval(st, "has_upper ^ has_lower") == 1, "XOR true (upper, no lower)");
+        CHECK(rfp_cc_eval(st, "(has_upper | has_lower) & !has_digit") == 1, "grouping");
+        /* one-sided integrity: unknown name / syntax error => -1 */
+        CHECK(rfp_cc_eval(st, "has_digit & bogus_name") == -1, "unknown name -> -1");
+        CHECK(rfp_cc_eval(st, "has_upper & &") == -1, "syntax error -> -1");
+        CHECK(rfp_cc_eval(st, "(has_upper") == -1, "unbalanced paren -> -1");
+        CHECK(rfp_cc_eval(st, "") == -1, "empty expr -> -1");
+    }
+
     printf("\n=== Results: %d/%d tests passed ===\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;
 }

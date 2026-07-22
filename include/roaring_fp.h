@@ -48,6 +48,11 @@ const char *rfp_cc_feature_name(int bit);
 int rfp_cc_feature_bit(const char *name);
 /* Whole feature registry as JSON [{"bit":n,"name":"..."}]; free with rfp_free_string. */
 char *rfp_cc_features_json(void);
+/* Evaluate a boolean feature-expression (over vocabulary names, ops & | ^ ! ~ ())
+ * against a precomputed signature. Returns 1/0, or -1 on an unknown name (broken
+ * reference) or syntax error. Pure function of (sig, expr) => soundly cacheable;
+ * user-land expands composite->composite DAGs to primitive-name exprs first. */
+int rfp_cc_eval(uint64_t sig, const char *expr);
 
 /* Add values */
 void rfp_add_uint32(rfp_bitmap *bm, uint32_t val);
