@@ -63,6 +63,12 @@ rfp_bitmap *rfp_from_base64(const char *b64, size_t len);
 /* Set operations */
 void rfp_or_inplace(rfp_bitmap *dst, const rfp_bitmap *src);
 
+/* Binary set operations returning a NEW bitmap (caller owns; free with
+ * rfp_free). Return NULL if either input is NULL. */
+rfp_bitmap *rfp_and(const rfp_bitmap *a, const rfp_bitmap *b);      /* intersection: a AND b     */
+rfp_bitmap *rfp_or(const rfp_bitmap *a, const rfp_bitmap *b);       /* union: a OR b             */
+rfp_bitmap *rfp_andnot(const rfp_bitmap *a, const rfp_bitmap *b);   /* difference: a but not in b */
+
 /* Array conversion: expand bitmap to sorted uint32 array / build from array */
 /* Returns number of elements written. Caller provides buf of at least
  * rfp_cardinality(bm) uint32_t slots. */

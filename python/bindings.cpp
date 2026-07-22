@@ -93,6 +93,20 @@ public:
         rfp_or_inplace(bm_, other.bm_);
     }
 
+    /* Binary set-ops returning a NEW RoaringFP that owns a NEW bitmap.
+       Never alias other's bitmap — each Python object frees its own. */
+    RoaringFP intersect(const RoaringFP &other) const {
+        return RoaringFP(rfp_and(bm_, other.bm_));
+    }
+
+    RoaringFP set_union(const RoaringFP &other) const {
+        return RoaringFP(rfp_or(bm_, other.bm_));
+    }
+
+    RoaringFP difference(const RoaringFP &other) const {
+        return RoaringFP(rfp_andnot(bm_, other.bm_));
+    }
+
     rfp_bitmap *raw() const { return bm_; }
 
 private:
@@ -151,6 +165,9 @@ NB_MODULE(_core, m) {
         .def("containment", &RoaringFP::containment, "Containment score: |self & other| / |self|")
         .def("jaccard", &RoaringFP::jaccard, "Jaccard similarity with another bitmap")
         .def("or_inplace", &RoaringFP::or_inplace, "Union with another bitmap in place")
+        .def("intersect", &RoaringFP::intersect, "Intersection: new bitmap of self AND other")
+        .def("union", &RoaringFP::set_union, "Union: new bitmap of self OR other")
+        .def("difference", &RoaringFP::difference, "Difference: new bitmap of self but not other")
         .def("__len__", &RoaringFP::cardinality)
         .def("__repr__", [](const RoaringFP &fp) {
             return "RoaringFP(cardinality=" + std::to_string(fp.cardinality()) + ")";

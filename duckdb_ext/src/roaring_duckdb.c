@@ -1,8 +1,12 @@
 /*
  * DuckDB C API extension for roaring bitmap fingerprinting.
  *
- * Registers 13 scalar functions with bf_ prefix:
+ * Registers one aggregate and a set of scalar functions with bf_ prefix:
+ *   bf_build(value)                    [aggregate]   -> BLOB
  *   bf_build_json(json_array)                        -> BLOB
+ *   bf_intersect(a, b)                               -> BLOB
+ *   bf_union(a, b)                                   -> BLOB
+ *   bf_difference(a, b)                              -> BLOB
  *   bf_cardinality(blob)                             -> UBIGINT
  *   bf_intersection_card(a, b)                       -> UBIGINT
  *   bf_containment(probe, ref)                       -> DOUBLE
@@ -64,6 +68,110 @@ static char *str_dup_z(duckdb_string_t *s) {
         duckdb_validity_set_row_invalid(duckdb_vector_get_validity(output), row); \
         continue; \
     }
+
+/* ── Constant-operand caching for binary scalars ────────────────────
+   In a probe query (many filter blobs × one constant LUT blob), the 2nd
+   operand is the same BLOB on every row.  The DuckDB C API exposes no
+   constant-vector flag, so we detect constancy by pointer+length identity:
+   DuckDB's string storage keeps non-inlined (> 12 byte) blob pointers
+   stable within a chunk, so if the next row's blob has the same data
+   pointer and length we reuse the already-deserialized bitmap instead of
+   paying rfp_deserialize per row.  If the operand does vary per row this
+   degrades gracefully to one deserialize per row (same as no cache). */
+
+typedef struct {
+    const char *ref_ptr;   /* pointer to last ref blob data */
+    uint32_t    ref_len;   /* length of last ref blob */
+    rfp_bitmap *ref_bm;    /* deserialized bitmap (owned) */
+} RefCache;
+
+static rfp_bitmap *get_ref_cached(RefCache *cache,
+                                   const char *blob, uint32_t len) {
+    if (cache->ref_bm && cache->ref_len == len && cache->ref_ptr == blob)
+        return cache->ref_bm;
+
+    if (cache->ref_bm) rfp_free(cache->ref_bm);
+    cache->ref_ptr = blob;
+    cache->ref_len = len;
+    cache->ref_bm  = rfp_deserialize(blob, len);
+    return cache->ref_bm;
+}
+
+/* ── bf_build(value VARCHAR) -> BLOB   [aggregate] ───────────────────
+   Hashes each non-NULL value via FNV-1a into a roaring bitmap.  Lets a
+   probe query build one filter per group with GROUP BY and reuse it,
+   instead of regenerating filters.  Mirrors SQLite's bf_build aggregate. */
+
+typedef struct {
+    rfp_bitmap *bm;
+} BfBuildState;
+
+static idx_t bf_build_state_size(duckdb_function_info info) {
+    (void)info;
+    return sizeof(BfBuildState);
+}
+
+static void bf_build_init(duckdb_function_info info, duckdb_aggregate_state state) {
+    (void)info;
+    BfBuildState *s = (BfBuildState *)state;
+    s->bm = rfp_create();
+}
+
+static void bf_build_update(duckdb_function_info info, duckdb_data_chunk input,
+                            duckdb_aggregate_state *states) {
+    (void)info;
+    idx_t size = duckdb_data_chunk_get_size(input);
+    duckdb_vector vec0 = duckdb_data_chunk_get_vector(input, 0);
+    duckdb_string_t *data0 = (duckdb_string_t *)duckdb_vector_get_data(vec0);
+    uint64_t *val0 = duckdb_vector_get_validity(vec0);
+
+    for (idx_t row = 0; row < size; row++) {
+        if (val0 && !duckdb_validity_row_is_valid(val0, row)) continue; /* ignore NULLs */
+        BfBuildState *s = (BfBuildState *)states[row];
+        if (!s->bm) s->bm = rfp_create();
+        uint32_t len;
+        const char *str = str_ptr(&data0[row], &len);
+        rfp_add_hash(s->bm, str, len);
+    }
+}
+
+static void bf_build_combine(duckdb_function_info info, duckdb_aggregate_state *source,
+                             duckdb_aggregate_state *target, idx_t count) {
+    (void)info;
+    for (idx_t i = 0; i < count; i++) {
+        BfBuildState *src = (BfBuildState *)source[i];
+        BfBuildState *dst = (BfBuildState *)target[i];
+        if (!src->bm) continue;
+        if (!dst->bm) dst->bm = rfp_create();
+        rfp_or_inplace(dst->bm, src->bm);
+    }
+}
+
+static void bf_build_finalize(duckdb_function_info info, duckdb_aggregate_state *source,
+                              duckdb_vector result, idx_t count, idx_t offset) {
+    (void)info;
+    for (idx_t i = 0; i < count; i++) {
+        BfBuildState *s = (BfBuildState *)source[i];
+        rfp_bitmap *bm = s->bm;
+        int temp = 0;
+        if (!bm) { bm = rfp_create(); temp = 1; } /* all-NULL / empty group */
+
+        size_t sz = rfp_serialized_size(bm);
+        char *buf = (char *)malloc(sz);
+        rfp_serialize(bm, buf, sz);
+        duckdb_vector_assign_string_element_len(result, offset + i, buf, sz);
+        free(buf);
+
+        if (temp) rfp_free(bm); /* s->bm is released in the destructor */
+    }
+}
+
+static void bf_build_destroy(duckdb_aggregate_state *states, idx_t count) {
+    for (idx_t i = 0; i < count; i++) {
+        BfBuildState *s = (BfBuildState *)states[i];
+        if (s->bm) { rfp_free(s->bm); s->bm = NULL; }
+    }
+}
 
 /* ── bf_build_json(json_array VARCHAR) -> BLOB ───────────────────── */
 
@@ -160,6 +268,7 @@ static void bf_intersection_card_func(duckdb_function_info info,
     uint64_t *val0 = duckdb_vector_get_validity(vec0);
     uint64_t *val1 = duckdb_vector_get_validity(vec1);
     uint64_t *result_data = (uint64_t *)duckdb_vector_get_data(output);
+    RefCache cache = {NULL, 0, NULL};  /* operand b is often a constant LUT */
 
     for (idx_t row = 0; row < size; row++) {
         CHECK_NULL_2(row);
@@ -168,17 +277,16 @@ static void bf_intersection_card_func(duckdb_function_info info,
         const char *blob_b = str_ptr(&data1[row], &len_b);
 
         rfp_bitmap *a = rfp_deserialize(blob_a, len_a);
-        rfp_bitmap *b = rfp_deserialize(blob_b, len_b);
+        rfp_bitmap *b = get_ref_cached(&cache, blob_b, len_b);
         if (!a || !b) {
             rfp_free(a);
-            rfp_free(b);
             result_data[row] = 0;
             continue;
         }
         result_data[row] = rfp_intersection_card(a, b);
         rfp_free(a);
-        rfp_free(b);
     }
+    if (cache.ref_bm) rfp_free(cache.ref_bm);
 }
 
 /* ── bf_containment(probe BLOB, ref BLOB) -> DOUBLE ──────────────── */
@@ -192,9 +300,9 @@ static void bf_containment_func(duckdb_function_info info,
     duckdb_string_t *data0 = (duckdb_string_t *)duckdb_vector_get_data(vec0);
     duckdb_string_t *data1 = (duckdb_string_t *)duckdb_vector_get_data(vec1);
     uint64_t *val0 = duckdb_vector_get_validity(vec0);
-    /* Note: both args vary in this function, so no ref caching. */
     uint64_t *val1 = duckdb_vector_get_validity(vec1);
     double *result_data = (double *)duckdb_vector_get_data(output);
+    RefCache cache = {NULL, 0, NULL};  /* ref (arg 2) is often a constant */
 
     for (idx_t row = 0; row < size; row++) {
         CHECK_NULL_2(row);
@@ -203,17 +311,16 @@ static void bf_containment_func(duckdb_function_info info,
         const char *blob_b = str_ptr(&data1[row], &len_b);
 
         rfp_bitmap *probe = rfp_deserialize(blob_a, len_a);
-        rfp_bitmap *ref = rfp_deserialize(blob_b, len_b);
+        rfp_bitmap *ref = get_ref_cached(&cache, blob_b, len_b);
         if (!probe || !ref) {
             rfp_free(probe);
-            rfp_free(ref);
             result_data[row] = 0.0;
             continue;
         }
         result_data[row] = rfp_containment(probe, ref);
         rfp_free(probe);
-        rfp_free(ref);
     }
+    if (cache.ref_bm) rfp_free(cache.ref_bm);
 }
 
 /* ── bf_jaccard(a BLOB, b BLOB) -> DOUBLE ────────────────────────── */
@@ -229,6 +336,7 @@ static void bf_jaccard_func(duckdb_function_info info,
     uint64_t *val0 = duckdb_vector_get_validity(vec0);
     uint64_t *val1 = duckdb_vector_get_validity(vec1);
     double *result_data = (double *)duckdb_vector_get_data(output);
+    RefCache cache = {NULL, 0, NULL};  /* operand b is often a constant */
 
     for (idx_t row = 0; row < size; row++) {
         CHECK_NULL_2(row);
@@ -237,17 +345,93 @@ static void bf_jaccard_func(duckdb_function_info info,
         const char *blob_b = str_ptr(&data1[row], &len_b);
 
         rfp_bitmap *a = rfp_deserialize(blob_a, len_a);
-        rfp_bitmap *b = rfp_deserialize(blob_b, len_b);
+        rfp_bitmap *b = get_ref_cached(&cache, blob_b, len_b);
         if (!a || !b) {
             rfp_free(a);
-            rfp_free(b);
             result_data[row] = 0.0;
             continue;
         }
         result_data[row] = rfp_jaccard(a, b);
         rfp_free(a);
-        rfp_free(b);
     }
+    if (cache.ref_bm) rfp_free(cache.ref_bm);
+}
+
+/* ── Binary blob set-ops: bf_intersect / bf_union / bf_difference ───
+   Deserialize both operands, apply a core rfp binary op, serialize the
+   result back to a BLOB.  Operand b is cached via RefCache since it is
+   commonly a constant LUT in probe queries. */
+
+typedef rfp_bitmap *(*rfp_binop)(const rfp_bitmap *, const rfp_bitmap *);
+
+static void bf_binop_blob(duckdb_data_chunk input, duckdb_vector output,
+                          rfp_binop op) {
+    idx_t size = duckdb_data_chunk_get_size(input);
+    duckdb_vector vec0 = duckdb_data_chunk_get_vector(input, 0);
+    duckdb_vector vec1 = duckdb_data_chunk_get_vector(input, 1);
+    duckdb_string_t *data0 = (duckdb_string_t *)duckdb_vector_get_data(vec0);
+    duckdb_string_t *data1 = (duckdb_string_t *)duckdb_vector_get_data(vec1);
+    uint64_t *val0 = duckdb_vector_get_validity(vec0);
+    uint64_t *val1 = duckdb_vector_get_validity(vec1);
+    RefCache cache = {NULL, 0, NULL};
+
+    for (idx_t row = 0; row < size; row++) {
+        CHECK_NULL_2(row);
+        uint32_t len_a, len_b;
+        const char *blob_a = str_ptr(&data0[row], &len_a);
+        const char *blob_b = str_ptr(&data1[row], &len_b);
+
+        rfp_bitmap *a = rfp_deserialize(blob_a, len_a);
+        rfp_bitmap *b = get_ref_cached(&cache, blob_b, len_b);
+        if (!a || !b) {
+            rfp_free(a);  /* b is cache-owned, freed once after the loop */
+            duckdb_vector_ensure_validity_writable(output);
+            duckdb_validity_set_row_invalid(duckdb_vector_get_validity(output), row);
+            continue;
+        }
+        rfp_bitmap *r = op(a, b);
+        rfp_free(a);
+        if (!r) {
+            duckdb_vector_ensure_validity_writable(output);
+            duckdb_validity_set_row_invalid(duckdb_vector_get_validity(output), row);
+            continue;
+        }
+        size_t sz = rfp_serialized_size(r);
+        char *buf = (char *)malloc(sz);
+        rfp_serialize(r, buf, sz);
+        rfp_free(r);
+
+        duckdb_vector_assign_string_element_len(output, row, buf, sz);
+        free(buf);
+    }
+    if (cache.ref_bm) rfp_free(cache.ref_bm);
+}
+
+/* ── bf_intersect(a BLOB, b BLOB) -> BLOB ────────────────────────── */
+
+static void bf_intersect_func(duckdb_function_info info,
+                              duckdb_data_chunk input,
+                              duckdb_vector output) {
+    (void)info;
+    bf_binop_blob(input, output, rfp_and);
+}
+
+/* ── bf_union(a BLOB, b BLOB) -> BLOB ────────────────────────────── */
+
+static void bf_union_func(duckdb_function_info info,
+                          duckdb_data_chunk input,
+                          duckdb_vector output) {
+    (void)info;
+    bf_binop_blob(input, output, rfp_or);
+}
+
+/* ── bf_difference(a BLOB, b BLOB) -> BLOB ───────────────────────── */
+
+static void bf_difference_func(duckdb_function_info info,
+                               duckdb_data_chunk input,
+                               duckdb_vector output) {
+    (void)info;
+    bf_binop_blob(input, output, rfp_andnot);
 }
 
 /* ── bf_to_base64(blob BLOB) -> VARCHAR ──────────────────────────── */
@@ -311,40 +495,11 @@ static void bf_from_base64_func(duckdb_function_info info,
     }
 }
 
-/* ── Shared containment implementation with ref bitmap caching ──────
-   In a CROSS JOIN (cells × domains), the ref bitmap (arg 2) is constant
-   across all rows in a chunk for a given domain.  Deserializing the same
-   50KB bitmap 2048 times per chunk is pure waste.
-
-   Fix: cache the last deserialized ref bitmap and its source pointer.
-   If the next row's ref BLOB has the same data pointer, reuse it.
-   DuckDB's string storage guarantees pointer stability within a chunk
-   for non-inlined strings (> 12 bytes), so pointer comparison is safe.
-
-   Also provides a single-string probe path (rfp_add_hash / _normalized)
-   that avoids JSON array parsing overhead for the common case of
-   probing one value at a time. The JSON path is used as fallback when
-   the input contains JSON array syntax. */
-
-typedef struct {
-    const char *ref_ptr;   /* pointer to last ref blob data */
-    uint32_t    ref_len;   /* length of last ref blob */
-    rfp_bitmap *ref_bm;    /* deserialized bitmap (owned) */
-} RefCache;
-
-static rfp_bitmap *get_ref_cached(RefCache *cache,
-                                   const char *blob, uint32_t len) {
-    if (cache->ref_bm && cache->ref_len == len && cache->ref_ptr == blob)
-        return cache->ref_bm;
-
-    if (cache->ref_bm) rfp_free(cache->ref_bm);
-    cache->ref_ptr = blob;
-    cache->ref_len = len;
-    cache->ref_bm  = rfp_deserialize(blob, len);
-    return cache->ref_bm;
-}
-
-/* ── bf_containment_json(json VARCHAR, ref BLOB) -> DOUBLE ───────── */
+/* ── bf_containment_json(json VARCHAR, ref BLOB) -> DOUBLE ─────────
+   The single-string / JSON-array probe paths below (rfp_add_hash vs
+   rfp_add_json_array) let one value be probed without JSON parsing when
+   the input has no '[' prefix; the ref BLOB (arg 2) is cached via
+   RefCache exactly as in the binary blob scalars above. */
 
 static void bf_containment_json_func(duckdb_function_info info,
                                      duckdb_data_chunk input,
@@ -815,6 +970,56 @@ static void register_functions(duckdb_connection connection) {
         duckdb_scalar_function_add_parameter(f, varchar_type);
         duckdb_scalar_function_set_return_type(f, blob_type);
         duckdb_scalar_function_set_function(f, bf_build_json_func);
+        duckdb_register_scalar_function(connection, f);
+        duckdb_destroy_scalar_function(&f);
+    }
+
+    /* bf_build(value VARCHAR) -> BLOB   [aggregate] */
+    {
+        duckdb_aggregate_function f = duckdb_create_aggregate_function();
+        duckdb_aggregate_function_set_name(f, "bf_build");
+        duckdb_aggregate_function_add_parameter(f, varchar_type);
+        duckdb_aggregate_function_set_return_type(f, blob_type);
+        duckdb_aggregate_function_set_functions(f, bf_build_state_size,
+                                                bf_build_init, bf_build_update,
+                                                bf_build_combine, bf_build_finalize);
+        duckdb_aggregate_function_set_destructor(f, bf_build_destroy);
+        duckdb_register_aggregate_function(connection, f);
+        duckdb_destroy_aggregate_function(&f);
+    }
+
+    /* bf_intersect(a BLOB, b BLOB) -> BLOB */
+    {
+        duckdb_scalar_function f = duckdb_create_scalar_function();
+        duckdb_scalar_function_set_name(f, "bf_intersect");
+        duckdb_scalar_function_add_parameter(f, blob_type);
+        duckdb_scalar_function_add_parameter(f, blob_type);
+        duckdb_scalar_function_set_return_type(f, blob_type);
+        duckdb_scalar_function_set_function(f, bf_intersect_func);
+        duckdb_register_scalar_function(connection, f);
+        duckdb_destroy_scalar_function(&f);
+    }
+
+    /* bf_union(a BLOB, b BLOB) -> BLOB */
+    {
+        duckdb_scalar_function f = duckdb_create_scalar_function();
+        duckdb_scalar_function_set_name(f, "bf_union");
+        duckdb_scalar_function_add_parameter(f, blob_type);
+        duckdb_scalar_function_add_parameter(f, blob_type);
+        duckdb_scalar_function_set_return_type(f, blob_type);
+        duckdb_scalar_function_set_function(f, bf_union_func);
+        duckdb_register_scalar_function(connection, f);
+        duckdb_destroy_scalar_function(&f);
+    }
+
+    /* bf_difference(a BLOB, b BLOB) -> BLOB */
+    {
+        duckdb_scalar_function f = duckdb_create_scalar_function();
+        duckdb_scalar_function_set_name(f, "bf_difference");
+        duckdb_scalar_function_add_parameter(f, blob_type);
+        duckdb_scalar_function_add_parameter(f, blob_type);
+        duckdb_scalar_function_set_return_type(f, blob_type);
+        duckdb_scalar_function_set_function(f, bf_difference_func);
         duckdb_register_scalar_function(connection, f);
         duckdb_destroy_scalar_function(&f);
     }

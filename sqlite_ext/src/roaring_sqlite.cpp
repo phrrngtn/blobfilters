@@ -8,6 +8,9 @@
  *   bf_build_json(json_array TEXT) -> BLOB
  *   bf_cardinality(blob BLOB) -> INTEGER
  *   bf_intersection_card(a BLOB, b BLOB) -> INTEGER
+ *   bf_intersect(a BLOB, b BLOB) -> BLOB
+ *   bf_union(a BLOB, b BLOB) -> BLOB
+ *   bf_difference(a BLOB, b BLOB) -> BLOB
  *   bf_containment(probe BLOB, ref BLOB) -> REAL
  *   bf_jaccard(a BLOB, b BLOB) -> REAL
  *   bf_to_base64(blob BLOB) -> TEXT
@@ -806,6 +809,76 @@ static void sqlite_roaring_contains(sqlite3_context *ctx, int argc, sqlite3_valu
 }
 
 
+/* ========================================================================
+ *   Binary blob set-ops: bf_intersect / bf_union / bf_difference -> BLOB
+ *
+ * Operand a (1st arg) is the per-group filter and varies row to row, so it
+ * is deserialized fresh each call.  Operand b (2nd arg) is commonly a
+ * constant reference/LUT, so it is cached via auxdata — SQLite owns the
+ * cached pointer and calls rfp_free when the argument changes or the
+ * statement finalizes, so we must NOT free it ourselves.  The result and
+ * the fresh operand a are freed within this call.
+ * ======================================================================== */
+
+static void sqlite_roaring_binop(sqlite3_context *ctx, int argc, sqlite3_value **argv,
+                                 rfp_bitmap *(*op)(const rfp_bitmap *, const rfp_bitmap *)) {
+    if (argc != 2 || sqlite3_value_type(argv[0]) == SQLITE_NULL
+                   || sqlite3_value_type(argv[1]) == SQLITE_NULL) {
+        sqlite3_result_null(ctx);
+        return;
+    }
+
+    /* operand a — fresh, always owned by us */
+    const char *data_a = static_cast<const char *>(sqlite3_value_blob(argv[0]));
+    int len_a = sqlite3_value_bytes(argv[0]);
+    rfp_bitmap *a = rfp_deserialize(data_a, static_cast<size_t>(len_a));
+
+    /* operand b — cache only when it is a genuine BLOB */
+    rfp_bitmap *b = nullptr;
+    bool owned_b = false;
+    if (sqlite3_value_type(argv[1]) == SQLITE_BLOB) {
+        b = get_cached_bitmap(ctx, 1, argv, &owned_b);
+    } else {
+        const char *data_b = static_cast<const char *>(sqlite3_value_blob(argv[1]));
+        int len_b = sqlite3_value_bytes(argv[1]);
+        b = rfp_deserialize(data_b, static_cast<size_t>(len_b));
+        owned_b = true;
+    }
+
+    if (!a || !b) {
+        if (a) rfp_free(a);
+        if (b && owned_b) rfp_free(b);
+        sqlite3_result_null(ctx);
+        return;
+    }
+
+    rfp_bitmap *r = op(a, b);
+    rfp_free(a);
+    if (owned_b) rfp_free(b);
+
+    if (!r) { sqlite3_result_error_nomem(ctx); return; }
+
+    size_t size = rfp_serialized_size(r);
+    void *buf = sqlite3_malloc64(static_cast<sqlite3_int64>(size));
+    if (!buf) { rfp_free(r); sqlite3_result_error_nomem(ctx); return; }
+    rfp_serialize(r, static_cast<char *>(buf), size);
+    rfp_free(r);
+
+    sqlite3_result_blob(ctx, buf, static_cast<int>(size), sqlite3_free);
+}
+
+static void sqlite_roaring_intersect(sqlite3_context *ctx, int argc, sqlite3_value **argv) {
+    sqlite_roaring_binop(ctx, argc, argv, rfp_and);
+}
+
+static void sqlite_roaring_union(sqlite3_context *ctx, int argc, sqlite3_value **argv) {
+    sqlite_roaring_binop(ctx, argc, argv, rfp_or);
+}
+
+static void sqlite_roaring_difference(sqlite3_context *ctx, int argc, sqlite3_value **argv) {
+    sqlite_roaring_binop(ctx, argc, argv, rfp_andnot);
+}
+
 #ifdef _WIN32
 __declspec(dllexport)
 #endif
@@ -823,6 +896,12 @@ int sqlite3_blobfilters_init(sqlite3 *db, char **pzErrMsg, const sqlite3_api_rou
                             nullptr, sqlite_roaring_cardinality, nullptr, nullptr);
     sqlite3_create_function(db, "bf_intersection_card", 2, SQLITE_UTF8 | SQLITE_DETERMINISTIC,
                             nullptr, sqlite_roaring_intersection_card, nullptr, nullptr);
+    sqlite3_create_function(db, "bf_intersect", 2, SQLITE_UTF8 | SQLITE_DETERMINISTIC,
+                            nullptr, sqlite_roaring_intersect, nullptr, nullptr);
+    sqlite3_create_function(db, "bf_union", 2, SQLITE_UTF8 | SQLITE_DETERMINISTIC,
+                            nullptr, sqlite_roaring_union, nullptr, nullptr);
+    sqlite3_create_function(db, "bf_difference", 2, SQLITE_UTF8 | SQLITE_DETERMINISTIC,
+                            nullptr, sqlite_roaring_difference, nullptr, nullptr);
     sqlite3_create_function(db, "bf_containment", 2, SQLITE_UTF8 | SQLITE_DETERMINISTIC,
                             nullptr, sqlite_roaring_containment, nullptr, nullptr);
     sqlite3_create_function(db, "bf_jaccard", 2, SQLITE_UTF8 | SQLITE_DETERMINISTIC,

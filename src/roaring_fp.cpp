@@ -326,6 +326,44 @@ void rfp_or_inplace(rfp_bitmap *dst, const rfp_bitmap *src) {
     roaring_bitmap_or_inplace(dst->roaring, src->roaring);
 }
 
+/* Binary set operations returning a NEW bitmap (allocated like rfp_copy). */
+
+rfp_bitmap *rfp_and(const rfp_bitmap *a, const rfp_bitmap *b) {
+    if (!a || !a->roaring || !b || !b->roaring) return nullptr;
+    auto *out = new (std::nothrow) rfp_bitmap;
+    if (!out) return nullptr;
+    out->roaring = roaring_bitmap_and(a->roaring, b->roaring);
+    if (!out->roaring) {
+        delete out;
+        return nullptr;
+    }
+    return out;
+}
+
+rfp_bitmap *rfp_or(const rfp_bitmap *a, const rfp_bitmap *b) {
+    if (!a || !a->roaring || !b || !b->roaring) return nullptr;
+    auto *out = new (std::nothrow) rfp_bitmap;
+    if (!out) return nullptr;
+    out->roaring = roaring_bitmap_or(a->roaring, b->roaring);
+    if (!out->roaring) {
+        delete out;
+        return nullptr;
+    }
+    return out;
+}
+
+rfp_bitmap *rfp_andnot(const rfp_bitmap *a, const rfp_bitmap *b) {
+    if (!a || !a->roaring || !b || !b->roaring) return nullptr;
+    auto *out = new (std::nothrow) rfp_bitmap;
+    if (!out) return nullptr;
+    out->roaring = roaring_bitmap_andnot(a->roaring, b->roaring);
+    if (!out->roaring) {
+        delete out;
+        return nullptr;
+    }
+    return out;
+}
+
 /* ========================================================================
  * Array conversion
  * ======================================================================== */
