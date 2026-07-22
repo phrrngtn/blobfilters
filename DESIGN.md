@@ -586,3 +586,111 @@ classified feeds back into the catalog as queryable facts:
 
 No retraining or model updates are needed — the system accumulates
 structured observations that directly improve future inversions.
+
+## Empirical Refinements (Socrata validation, 2026-07-22)
+
+Two independent derivations — this document, and a from-scratch DuckDB study over
+public Socrata open-data ([`sql/aboutness/`](sql/aboutness/)) — converged on the
+same spine (containment/Jaccard, catalog-as-Rule-4-tables, FK discovery via shared
+domains, alias bootstrapping from observed column names, blobboxes as token source,
+histogram triage → dimension/measure). That convergence is the main validation. The
+study also surfaced corrections. The organizing one first, then specifics.
+
+### The primitive: a domain is a compact value with probabilistic set-algebra
+
+The thing stored is not the domain's values but a **compact value supporting
+probabilistic estimates of intersection and disjointness** — a *sketch*. Compactness
+is what makes it storable-as-a-value and mobile (below); probabilistic set-algebra
+(estimate `|A∩B|`, and especially *are A and B disjoint?*) is what makes it useful.
+Which sketch (hashed roaring, MinHash, HyperLogLog, Bloom) and what fidelity are
+negotiable around that core; this is the one non-negotiable.
+
+The hashed roaring fingerprint delivers exactly this, with a valuable **one-sided
+guarantee**: a shared value forces a shared hash, so `hash-disjoint ⟹ truly disjoint`
+(no false negatives), while a reported overlap *might* be a hash collision
+(probabilistic). It is therefore a **sound pruning filter** — "definitely disjoint →
+drop, maybe-overlap → keep for a finer probe" — which is precisely the coarse front of
+the cascade: it never wrongly discards a real match, it only over-retains.
+
+### Evidence, not verdicts (the framing)
+
+The output of probing is **evidence**, not a decision. Each probe emits a row —
+`⟨probe, domain, canon_level, grain, metric, value⟩` — into a long, narrow evidence
+relation that is then *combined, ranked, and filtered* by ordinary SQL. `arg_max`
+(one domain per column) is only **one terminal reducer** you might run for display;
+top-k, thresholding, or feeding the whole evidence vector to a downstream combiner
+are equally valid. Collapsing to a single winner early discards most of the signal.
+This restates the doc's own contract — blobfilters produces *signals*, the consumer
+applies *policy* — and extends it: do not reduce inside blobfilters at all.
+
+The sieve is a **coarse-to-fine cascade**, deliberately loose at the front and
+tightened in stages. Because it is staged, **the stage at which a symbol drops out
+is itself signal**: a symbol that survives casefold but dies at numeric
+canonicalization; a value in no known domain; a column whose symbols mostly fall out
+at the coarse hash sieve — each drop-point is a label. Track the *survival trace* of
+a symbol / column through the cascade, not just the final score.
+
+### Filters are heterogeneous; only two things are shared
+
+Different filters may have wildly different characteristics — hashed roaring
+(cheap, lossy, dictionary-free), interned-exact roaring (decodable, false-positive-
+free), histogram fingerprints, Bloom projections — and that is fine, even desirable.
+A filter must satisfy exactly two contracts, nothing more:
+
+1. **It is a value** — storable in and retrievable from the database as a blob
+   (`bf_to_base64` / `bf_from_base64` already exist for this).
+2. **Fast Roaring operations are available wherever it is evaluated** — SQLite,
+   DuckDB, Python, *and* Wasm / browser / Office.
+
+Because filters differ in fidelity, each filter's fidelity/cost should travel with it
+as metadata, so an evidence combiner can *weight* rather than blindly merge. (This is
+why refinement #1 below is a labeling fix, not a "replace the hashed layer" mandate.)
+
+### Filters are mobile values — ship the filter to the data
+
+A blobfilter is a self-contained blob, so it travels. The high-value pattern is a
+semijoin / Bloom-join **pushdown**: run a coarse pass over a workbook's bboxes to
+identify the *candidate* domains it plausibly references, **retrieve just those
+blobfilters as values** into the spreadsheet, and probe **close to the source** —
+in DuckDB-Wasm, the browser (`docs/browser-domain-matching.md`), or an Office add-in
+— instead of hauling all the data to a central classifier. This *is* the cascade: the
+coarse stage decides which fine filters are even worth shipping.
+
+### Specific corrections
+
+1. **Do not call the hashed layer "exact."** `FNV-1a → uint32` is lossy, non-injective,
+   and non-decodable, with cross-domain false positives on *overlap* (never on
+   disjointness — see the primitive above). It is the coarse, dictionary-free evidence
+   source; its virtue is real (cross-source with no shared dictionary). Label its
+   fidelity as metadata so evidence combiners weight rather than blindly merge, and
+   fold probe-size and domain-size into confidence (a 4-symbol probe against a 10M
+   domain scores high overlap by chance — see the false-positive table above). A
+   genuinely-exact, *decodable* sketch — roaring over a shared *interned dictionary* —
+   is a worthwhile **optional finer rung** for query-inversion (which must name values,
+   not just count hits), not a replacement for the compact probabilistic value that is
+   the point.
+
+2. **Canonicalization is a cascade rung — default-on, in the C layer.** `normalize_
+   casefold` (NFKD + casefold + stripmark) is opt-in and covers case/diacritics only.
+   The common failure is *format*, not semantics: `district="008"` vs
+   `police_district="8"` are the same domain and never intersect until numeric
+   canonicalization (measured; casefold does not fix it). Each canonicalization level
+   is a rung, and a symbol dropping between rungs is *recorded evidence*, not a silent
+   loss. Canonicalize before hashing, richer than casefold, once in C so every binding
+   shares it — the "logic in C, not repeated across bindings" rule.
+
+3. **Two containment regimes — both are evidence columns; do not collapse to one.**
+   Asymmetric `C(probe, master)` is the *subset-labeling* evidence (column ⊆ domain).
+   **Mutual** `least(C(A,B), C(B,A))` is the *equivalence / induced-domain* evidence.
+   One-way containment alone ties at 1.0 across nested domains
+   (`ward{1..50} ⊆ community_area{1..77}`) and mis-ranks; the fix is to keep *both*
+   metrics and let the reducer choose, not to pick one. The `> 0.05` page-signature
+   threshold admits chance hits on large domains — weight by confidence.
+
+4. **The residue is evidence.** Every probe's uncovered `1 − containment` (the symbols
+   that dropped out) is a first-class output: `ON`/`QC` in a US-state column is
+   domain-boundary discovery (US → North-American), not error. Emit the anti-set, not
+   just the score.
+
+5. **Gate alias bootstrapping on mutual containment,** not one-way — a column
+   spuriously swallowed by a large domain would otherwise pollute the alias thesaurus.
