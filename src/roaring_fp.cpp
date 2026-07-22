@@ -469,12 +469,88 @@ int rfp_cc_feature_bit(const char *name) {
     return -1;
 }
 
-/* Dump the whole feature registry as JSON [{"bit":n,"name":"..."}], for interning
-   into a host database. Caller frees with rfp_free_string. */
+/* The feature vocabulary is the FK target for user-land domain->feature tables;
+   bump this (append-only!) whenever bits are added, never renumber/rename. */
+#define CC_VOCAB_VERSION 1
+
+/* Canonical RE2 regexp per feature bit — verified to reproduce rfp_cc_signature.
+   The universal exact definition (documents each bit; drives SQL-only vectors). */
+static const char *cc_regex(int bit) {
+    switch (bit) {
+    case CCF_HAS_DIGIT:  return "[0-9]";
+    case CCF_HAS_UPPER:  return "[A-Z]";
+    case CCF_HAS_LOWER:  return "[a-z]";
+    case CCF_HAS_SPACE:  return "\\s";
+    case CCF_HAS_DOT:    return "\\.";
+    case CCF_HAS_COMMA:  return ",";
+    case CCF_HAS_DASH:   return "-";
+    case CCF_HAS_SLASH:  return "/";
+    case CCF_HAS_COLON:  return ":";
+    case CCF_HAS_DOLLAR: return "\\$";
+    case CCF_HAS_PERCENT:return "%";
+    case CCF_HAS_AT:     return "@";
+    case CCF_HAS_PAREN:  return "[()]";
+    case CCF_HAS_PLUS:   return "\\+";
+    case CCF_HAS_UNDER:  return "_";
+    case CCF_HAS_APOS:   return "[\\x27\\x60]";
+    case CCF_HAS_OTHER:  return "[^\\x20-\\x7e]";
+    case CCF_ALL_DIGITS: return "^[0-9]+$";
+    case CCF_ALL_ALPHA:  return "^[A-Za-z]+$";
+    case CCF_ALL_UPPER:  return "^[A-Z]+$";
+    case CCF_ALL_LOWER:  return "^[a-z]+$";
+    case CCF_TITLE_CASE: return "^[A-Z].*[a-z]";
+    case CCF_ALNUM_ONLY: return "^[A-Za-z0-9]+$";
+    case CCF_DIGIT_AND_ALPHA:
+        return "^([A-Za-z0-9]*[0-9][A-Za-z0-9]*[A-Za-z]|[A-Za-z0-9]*[A-Za-z][A-Za-z0-9]*[0-9])[A-Za-z0-9]*$";
+    case CCF_LEADS_DIGIT:  return "^[0-9]";
+    case CCF_LEADS_ALPHA:  return "^[A-Za-z]";
+    case CCF_SINGLE_TOKEN: return "^\\s*\\S+\\s*$";
+    case CCF_MULTI_TOKEN:  return "\\S\\s+\\S";
+    case CCF_LEN_0:     return "^$";
+    case CCF_LEN_1:     return "^.$";
+    case CCF_LEN_2:     return "^.{2}$";
+    case CCF_LEN_3:     return "^.{3}$";
+    case CCF_LEN_4:     return "^.{4}$";
+    case CCF_LEN_5:     return "^.{5}$";
+    case CCF_LEN_6_10:  return "^.{6,10}$";
+    case CCF_LEN_11_20: return "^.{11,20}$";
+    case CCF_LEN_GT20:  return "^.{21,}$";
+    case CCF_MONEY_SHAPED:   return "(\\$.*[0-9])|([0-9].*\\$)";
+    case CCF_DATE_SHAPED:    return "((\\D*[0-9]){4}.*[-/])|([-/].*(\\D*[0-9]){4})|([0-9]+[-/][0-9]+[-/][0-9]+)";
+    case CCF_DECIMAL_SHAPED: return "^[^A-Za-z]*[0-9][^A-Za-z]*\\.[^A-Za-z]*$|^[^A-Za-z]*\\.[^A-Za-z]*[0-9][^A-Za-z]*$";
+    case CCF_CODE_SHAPED:    return "^[A-Z0-9]*[A-Z][A-Z0-9]*$";
+    case CCF_EMAIL_SHAPED:   return "(@.*\\.)|(\\..*@)";
+    case CCF_YEAR_SHAPED:    return "^[12][0-9]{3}$";
+    default: return nullptr;
+    }
+}
+
+/* Logical-operator definition for the composites that ARE a boolean function of
+   lower-level features (null for primitives / regexp-only / count-dependent ones). */
+static const char *cc_expr(int bit) {
+    switch (bit) {
+    case CCF_DIGIT_AND_ALPHA: return "alnum_only & has_digit & (has_upper | has_lower)";
+    case CCF_MONEY_SHAPED:    return "has_dollar & has_digit";
+    case CCF_DECIMAL_SHAPED:  return "has_digit & has_dot & !has_upper & !has_lower & !has_other";
+    case CCF_CODE_SHAPED:     return "alnum_only & has_upper & !has_lower & single_token";
+    case CCF_EMAIL_SHAPED:    return "has_at & has_dot";
+    default: return nullptr;
+    }
+}
+
+/* Dump the whole feature vocabulary (the FK target) as versioned JSON:
+   {"version":N,"features":[{"bit","name","regexp","expr"},...]}.
+   Caller frees with rfp_free_string. */
 char *rfp_cc_features_json(void) {
-    nlohmann::json j = nlohmann::json::array();
-    for (int b = 0; b < 64; b++)
-        if (kCcNames[b]) j.push_back({{"bit", b}, {"name", kCcNames[b]}});
+    nlohmann::json feats = nlohmann::json::array();
+    for (int b = 0; b < 64; b++) {
+        if (!kCcNames[b]) continue;
+        const char *rx = cc_regex(b), *ex = cc_expr(b);
+        feats.push_back({{"bit", b}, {"name", kCcNames[b]},
+                         {"regexp", rx ? nlohmann::json(rx) : nlohmann::json(nullptr)},
+                         {"expr",   ex ? nlohmann::json(ex) : nlohmann::json(nullptr)}});
+    }
+    nlohmann::json j = {{"version", CC_VOCAB_VERSION}, {"features", feats}};
     std::string s = j.dump();
     char *out = (char *)std::malloc(s.size() + 1);
     if (out) std::memcpy(out, s.c_str(), s.size() + 1);
