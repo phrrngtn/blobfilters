@@ -33,6 +33,22 @@ void        rfp_free(rfp_bitmap *bm);
 uint32_t rfp_fnv1a(const void *data, size_t len);
 uint32_t rfp_fnv1a_normalized(const void *data, size_t len, rfp_norm_mode mode);
 
+/* ── Char-class structural signature (the "structural type" layer) ───────────
+ * One pass over the bytes → a uint64 feature bitmask of semantics-free SHAPE
+ * features (has_digit, all_upper, len_2, money_shaped, …). No allocation, no
+ * regex; identical on native and WASM. Compose per-domain envelopes over member
+ * signatures with bit_and (NECESSARY = features every member has) and bit_or
+ * (ENVELOPE = features any member has). A value is plausibly in domain D iff
+ * (sig & D.necessary)==D.necessary AND (sig & ~D.envelope)==0 — necessary but
+ * not sufficient (sound for ruling domains OUT). */
+uint64_t rfp_cc_signature(const void *data, size_t len);
+/* Name of feature bit i (0..63) for the tiny feature registry; NULL if unused. */
+const char *rfp_cc_feature_name(int bit);
+/* Inverse: feature name -> bit index, or -1 if unknown (harmonize diverged sources). */
+int rfp_cc_feature_bit(const char *name);
+/* Whole feature registry as JSON [{"bit":n,"name":"..."}]; free with rfp_free_string. */
+char *rfp_cc_features_json(void);
+
 /* Add values */
 void rfp_add_uint32(rfp_bitmap *bm, uint32_t val);
 void rfp_add_hash(rfp_bitmap *bm, const void *data, size_t len);  /* FNV-1a -> add */

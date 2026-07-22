@@ -422,6 +422,136 @@ void rfp_bitmap_checksum_hex(const rfp_bitmap *bm, char *out, size_t out_cap) {
 }
 
 /* ========================================================================
+ * Char-class structural signature — one pass, no alloc, no regex.
+ * ======================================================================== */
+
+/* Feature-bit layout (the tiny "registry", as code). Keep <= 63. */
+enum {
+    /* primitive presence (0-16) */
+    CCF_HAS_DIGIT=0, CCF_HAS_UPPER, CCF_HAS_LOWER, CCF_HAS_SPACE, CCF_HAS_DOT,
+    CCF_HAS_COMMA, CCF_HAS_DASH, CCF_HAS_SLASH, CCF_HAS_COLON, CCF_HAS_DOLLAR,
+    CCF_HAS_PERCENT, CCF_HAS_AT, CCF_HAS_PAREN, CCF_HAS_PLUS, CCF_HAS_UNDER,
+    CCF_HAS_APOS, CCF_HAS_OTHER,
+    /* shape composites (20-31) */
+    CCF_ALL_DIGITS=20, CCF_ALL_ALPHA, CCF_ALL_UPPER, CCF_ALL_LOWER, CCF_TITLE_CASE,
+    CCF_ALNUM_ONLY, CCF_DIGIT_AND_ALPHA, CCF_LEADS_DIGIT, CCF_LEADS_ALPHA,
+    CCF_SINGLE_TOKEN, CCF_MULTI_TOKEN,
+    /* length buckets (32-40) */
+    CCF_LEN_0=32, CCF_LEN_1, CCF_LEN_2, CCF_LEN_3, CCF_LEN_4, CCF_LEN_5,
+    CCF_LEN_6_10, CCF_LEN_11_20, CCF_LEN_GT20,
+    /* higher shapes (44-49) */
+    CCF_MONEY_SHAPED=44, CCF_DATE_SHAPED, CCF_DECIMAL_SHAPED, CCF_CODE_SHAPED,
+    CCF_EMAIL_SHAPED, CCF_YEAR_SHAPED
+};
+
+static const char *kCcNames[64] = {
+    "has_digit","has_upper","has_lower","has_space","has_dot","has_comma","has_dash",
+    "has_slash","has_colon","has_dollar","has_percent","has_at","has_paren","has_plus",
+    "has_under","has_apos","has_other", 0,0,0,
+    "all_digits","all_alpha","all_upper","all_lower","title_case","alnum_only",
+    "digit_and_alpha","leads_digit","leads_alpha","single_token","multi_token", 0,
+    "len_0","len_1","len_2","len_3","len_4","len_5","len_6_10","len_11_20","len_gt20",
+    0,0,0,
+    "money_shaped","date_shaped","decimal_shaped","code_shaped","email_shaped","year_shaped",
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0
+};
+
+const char *rfp_cc_feature_name(int bit) {
+    if (bit < 0 || bit >= 64) return nullptr;
+    return kCcNames[bit];
+}
+
+/* Inverse: feature name -> bit index, or -1 if unknown (harmonize diverged sources). */
+int rfp_cc_feature_bit(const char *name) {
+    if (!name) return -1;
+    for (int b = 0; b < 64; b++)
+        if (kCcNames[b] && std::strcmp(kCcNames[b], name) == 0) return b;
+    return -1;
+}
+
+/* Dump the whole feature registry as JSON [{"bit":n,"name":"..."}], for interning
+   into a host database. Caller frees with rfp_free_string. */
+char *rfp_cc_features_json(void) {
+    nlohmann::json j = nlohmann::json::array();
+    for (int b = 0; b < 64; b++)
+        if (kCcNames[b]) j.push_back({{"bit", b}, {"name", kCcNames[b]}});
+    std::string s = j.dump();
+    char *out = (char *)std::malloc(s.size() + 1);
+    if (out) std::memcpy(out, s.c_str(), s.size() + 1);
+    return out;
+}
+
+#define CCBIT(b) (UINT64_C(1) << (b))
+
+uint64_t rfp_cc_signature(const void *data, size_t len) {
+    const unsigned char *s = static_cast<const unsigned char *>(data);
+    uint64_t sig = 0;
+    size_t nd=0, nu=0, nl=0, nsp=0, nalpha=0, ntok=0, nother=0;
+    unsigned char first=0; int in_tok=0;
+
+    for (size_t i=0;i<len;i++) {
+        unsigned char c = s[i];
+        int is_sp = (c==' '||c=='\t'||c=='\n'||c=='\r'||c=='\f'||c=='\v');
+        if (c>='0'&&c<='9') { nd++; sig|=CCBIT(CCF_HAS_DIGIT); }
+        else if (c>='A'&&c<='Z') { nu++; nalpha++; sig|=CCBIT(CCF_HAS_UPPER); }
+        else if (c>='a'&&c<='z') { nl++; nalpha++; sig|=CCBIT(CCF_HAS_LOWER); }
+        else if (is_sp) { nsp++; sig|=CCBIT(CCF_HAS_SPACE); }
+        else if (c<32 || c>126) { nother++; sig|=CCBIT(CCF_HAS_OTHER); }
+        switch (c) {
+            case '.': sig|=CCBIT(CCF_HAS_DOT);     break;
+            case ',': sig|=CCBIT(CCF_HAS_COMMA);   break;
+            case '-': sig|=CCBIT(CCF_HAS_DASH);    break;
+            case '/': sig|=CCBIT(CCF_HAS_SLASH);   break;
+            case ':': sig|=CCBIT(CCF_HAS_COLON);   break;
+            case '$': sig|=CCBIT(CCF_HAS_DOLLAR);  break;
+            case '%': sig|=CCBIT(CCF_HAS_PERCENT); break;
+            case '@': sig|=CCBIT(CCF_HAS_AT);      break;
+            case '(': case ')': sig|=CCBIT(CCF_HAS_PAREN); break;
+            case '+': sig|=CCBIT(CCF_HAS_PLUS);    break;
+            case '_': sig|=CCBIT(CCF_HAS_UNDER);   break;
+            case '\'': case '`': sig|=CCBIT(CCF_HAS_APOS); break;
+        }
+        if (is_sp) in_tok=0; else if (!in_tok){ in_tok=1; ntok++; }
+        if (i==0) first=c;
+    }
+
+    /* length buckets */
+    if (len==0) sig|=CCBIT(CCF_LEN_0);
+    else if (len==1) sig|=CCBIT(CCF_LEN_1);
+    else if (len==2) sig|=CCBIT(CCF_LEN_2);
+    else if (len==3) sig|=CCBIT(CCF_LEN_3);
+    else if (len==4) sig|=CCBIT(CCF_LEN_4);
+    else if (len==5) sig|=CCBIT(CCF_LEN_5);
+    else if (len<=10) sig|=CCBIT(CCF_LEN_6_10);
+    else if (len<=20) sig|=CCBIT(CCF_LEN_11_20);
+    else sig|=CCBIT(CCF_LEN_GT20);
+
+    /* shape composites */
+    if (len>0 && nd==len)                 sig|=CCBIT(CCF_ALL_DIGITS);
+    if (len>0 && nalpha==len)             sig|=CCBIT(CCF_ALL_ALPHA);
+    if (len>0 && nu==len)                 sig|=CCBIT(CCF_ALL_UPPER);
+    if (len>0 && nl==len)                 sig|=CCBIT(CCF_ALL_LOWER);
+    if (nalpha+nd==len && nd>0 && nalpha>0) sig|=CCBIT(CCF_DIGIT_AND_ALPHA);
+    if (len>0 && nalpha+nd==len)          sig|=CCBIT(CCF_ALNUM_ONLY);
+    if (first>='A'&&first<='Z' && nl>0)   sig|=CCBIT(CCF_TITLE_CASE);
+    if (first>='0'&&first<='9')           sig|=CCBIT(CCF_LEADS_DIGIT);
+    if ((first>='A'&&first<='Z')||(first>='a'&&first<='z')) sig|=CCBIT(CCF_LEADS_ALPHA);
+    if (ntok==1)                          sig|=CCBIT(CCF_SINGLE_TOKEN);
+    if (ntok>1)                           sig|=CCBIT(CCF_MULTI_TOKEN);
+
+    /* higher shapes */
+    if ((sig&CCBIT(CCF_HAS_DOLLAR)) && nd>0)                       sig|=CCBIT(CCF_MONEY_SHAPED);
+    if (nd>=4 && ((sig&CCBIT(CCF_HAS_DASH))||(sig&CCBIT(CCF_HAS_SLASH)))) sig|=CCBIT(CCF_DATE_SHAPED);
+    if (nd>0 && (sig&CCBIT(CCF_HAS_DOT)) && nalpha==0)             sig|=CCBIT(CCF_DECIMAL_SHAPED);
+    if ((sig&CCBIT(CCF_ALNUM_ONLY)) && ntok==1 && nu>0 && nl==0)  sig|=CCBIT(CCF_CODE_SHAPED);
+    if ((sig&CCBIT(CCF_HAS_AT)) && (sig&CCBIT(CCF_HAS_DOT)))       sig|=CCBIT(CCF_EMAIL_SHAPED);
+    if (len==4 && nd==4 && (first=='1'||first=='2'))              sig|=CCBIT(CCF_YEAR_SHAPED);
+
+    return sig;
+}
+#undef CCBIT
+
+/* ========================================================================
  * Set operations
  * ======================================================================== */
 

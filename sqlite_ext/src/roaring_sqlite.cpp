@@ -122,6 +122,29 @@ static void sqlite_roaring_checksum_final(sqlite3_context *ctx) {
     sqlite3_result_text(ctx, hex, 64, SQLITE_TRANSIENT);
 }
 
+/* ── char-class structural signature + registry utilities ─────────── */
+static void sqlite_cc_signature(sqlite3_context *ctx, int argc, sqlite3_value **argv) {
+    if (argc != 1 || sqlite3_value_type(argv[0]) == SQLITE_NULL) { sqlite3_result_null(ctx); return; }
+    const void *d = sqlite3_value_blob(argv[0]);
+    int len = sqlite3_value_bytes(argv[0]);
+    sqlite3_result_int64(ctx, (sqlite3_int64)rfp_cc_signature(d, (size_t)len));
+}
+static void sqlite_cc_feature_name(sqlite3_context *ctx, int argc, sqlite3_value **argv) {
+    if (argc != 1 || sqlite3_value_type(argv[0]) == SQLITE_NULL) { sqlite3_result_null(ctx); return; }
+    const char *nm = rfp_cc_feature_name(sqlite3_value_int(argv[0]));
+    if (nm) sqlite3_result_text(ctx, nm, -1, SQLITE_TRANSIENT); else sqlite3_result_null(ctx);
+}
+static void sqlite_cc_feature_bit(sqlite3_context *ctx, int argc, sqlite3_value **argv) {
+    if (argc != 1 || sqlite3_value_type(argv[0]) == SQLITE_NULL) { sqlite3_result_null(ctx); return; }
+    int b = rfp_cc_feature_bit(reinterpret_cast<const char *>(sqlite3_value_text(argv[0])));
+    if (b < 0) sqlite3_result_null(ctx); else sqlite3_result_int(ctx, b);
+}
+static void sqlite_cc_features_json(sqlite3_context *ctx, int, sqlite3_value **) {
+    char *js = rfp_cc_features_json();
+    if (js) { sqlite3_result_text(ctx, js, -1, SQLITE_TRANSIENT); rfp_free_string(js); }
+    else sqlite3_result_null(ctx);
+}
+
 /* ========================================================================
  *   bf_build_json(json_array TEXT) -> BLOB
  * ======================================================================== */
@@ -925,6 +948,14 @@ int sqlite3_blobfilters_init(sqlite3 *db, char **pzErrMsg, const sqlite3_api_rou
                             nullptr, sqlite_roaring_sha256, nullptr, nullptr);
     sqlite3_create_function(db, "bf_checksum", 1, SQLITE_UTF8 | SQLITE_DETERMINISTIC,
                             nullptr, nullptr, sqlite_roaring_build_step, sqlite_roaring_checksum_final);
+    sqlite3_create_function(db, "bf_cc_signature", 1, SQLITE_UTF8 | SQLITE_DETERMINISTIC,
+                            nullptr, sqlite_cc_signature, nullptr, nullptr);
+    sqlite3_create_function(db, "bf_cc_feature_name", 1, SQLITE_UTF8 | SQLITE_DETERMINISTIC,
+                            nullptr, sqlite_cc_feature_name, nullptr, nullptr);
+    sqlite3_create_function(db, "bf_cc_feature_bit", 1, SQLITE_UTF8 | SQLITE_DETERMINISTIC,
+                            nullptr, sqlite_cc_feature_bit, nullptr, nullptr);
+    sqlite3_create_function(db, "bf_cc_features_json", 0, SQLITE_UTF8 | SQLITE_DETERMINISTIC,
+                            nullptr, sqlite_cc_features_json, nullptr, nullptr);
 
     sqlite3_create_function(db, "bf_build_json", 1, SQLITE_UTF8 | SQLITE_DETERMINISTIC,
                             nullptr, sqlite_roaring_build_json, nullptr, nullptr);

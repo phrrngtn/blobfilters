@@ -837,6 +837,84 @@ static void bf_hash_normalized_func(duckdb_function_info info,
     }
 }
 
+/* ── bf_cc_signature(text VARCHAR) -> UBIGINT ────────────────────────
+   One-pass char-class structural feature bitmask (the structural type layer).
+   Compose domain envelopes with bit_and (necessary) / bit_or (envelope). */
+static void bf_cc_signature_func(duckdb_function_info info,
+                                 duckdb_data_chunk input,
+                                 duckdb_vector output) {
+    idx_t size = duckdb_data_chunk_get_size(input);
+    duckdb_vector vec0 = duckdb_data_chunk_get_vector(input, 0);
+    duckdb_string_t *data0 = (duckdb_string_t *)duckdb_vector_get_data(vec0);
+    uint64_t *val0 = duckdb_vector_get_validity(vec0);
+    uint64_t *result_data = (uint64_t *)duckdb_vector_get_data(output);
+    for (idx_t row = 0; row < size; row++) {
+        CHECK_NULL_1(row);
+        uint32_t len;
+        const char *str = str_ptr(&data0[row], &len);
+        result_data[row] = rfp_cc_signature(str, len);
+    }
+}
+
+/* ── bf_cc_feature_name(bit INTEGER) -> VARCHAR ──────────────────────
+   Decode a feature-bit index to its name (the tiny feature registry). */
+static void bf_cc_feature_name_func(duckdb_function_info info,
+                                    duckdb_data_chunk input,
+                                    duckdb_vector output) {
+    idx_t size = duckdb_data_chunk_get_size(input);
+    duckdb_vector vec0 = duckdb_data_chunk_get_vector(input, 0);
+    int32_t *data0 = (int32_t *)duckdb_vector_get_data(vec0);
+    uint64_t *val0 = duckdb_vector_get_validity(vec0);
+    for (idx_t row = 0; row < size; row++) {
+        CHECK_NULL_1(row);
+        const char *nm = rfp_cc_feature_name((int)data0[row]);
+        if (!nm) {
+            duckdb_vector_ensure_validity_writable(output);
+            duckdb_validity_set_row_invalid(duckdb_vector_get_validity(output), row);
+            continue;
+        }
+        duckdb_vector_assign_string_element_len(output, row, nm, strlen(nm));
+    }
+}
+
+/* ── bf_cc_feature_bit(name VARCHAR) -> INTEGER ──────────────────────
+   Inverse of bf_cc_feature_name; NULL when the name is unknown (a divergence
+   flag when harmonizing feature definitions across sources). */
+static void bf_cc_feature_bit_func(duckdb_function_info info,
+                                   duckdb_data_chunk input,
+                                   duckdb_vector output) {
+    idx_t size = duckdb_data_chunk_get_size(input);
+    duckdb_vector vec0 = duckdb_data_chunk_get_vector(input, 0);
+    duckdb_string_t *data0 = (duckdb_string_t *)duckdb_vector_get_data(vec0);
+    uint64_t *val0 = duckdb_vector_get_validity(vec0);
+    int32_t *result_data = (int32_t *)duckdb_vector_get_data(output);
+    for (idx_t row = 0; row < size; row++) {
+        CHECK_NULL_1(row);
+        char *name = str_dup_z(&data0[row]);
+        int bit = rfp_cc_feature_bit(name);
+        free(name);
+        if (bit < 0) {
+            duckdb_vector_ensure_validity_writable(output);
+            duckdb_validity_set_row_invalid(duckdb_vector_get_validity(output), row);
+            continue;
+        }
+        result_data[row] = bit;
+    }
+}
+
+/* ── bf_cc_features_json() -> VARCHAR ────────────────────────────────
+   Dump the whole feature registry as JSON, for interning into the host DB. */
+static void bf_cc_features_json_func(duckdb_function_info info,
+                                     duckdb_data_chunk input,
+                                     duckdb_vector output) {
+    idx_t size = duckdb_data_chunk_get_size(input);
+    char *js = rfp_cc_features_json();
+    size_t jlen = js ? strlen(js) : 0;
+    for (idx_t row = 0; row < size; row++)
+        duckdb_vector_assign_string_element_len(output, row, js ? js : "", jlen);
+    if (js) rfp_free_string(js);
+}
+
 /* ── bf_to_array(blob BLOB) -> UINTEGER[] ────────────────────────── */
 
 static void bf_to_array_func(duckdb_function_info info,
@@ -989,6 +1067,53 @@ static void register_functions(duckdb_connection connection) {
         duckdb_scalar_function_add_parameter(f, varchar_type);
         duckdb_scalar_function_set_return_type(f, uint_type);
         duckdb_scalar_function_set_function(f, bf_hash_func);
+        duckdb_register_scalar_function(connection, f);
+        duckdb_destroy_scalar_function(&f);
+    }
+
+    /* bf_cc_signature(text VARCHAR) -> UBIGINT */
+    {
+        duckdb_scalar_function f = duckdb_create_scalar_function();
+        duckdb_scalar_function_set_name(f, "bf_cc_signature");
+        duckdb_scalar_function_add_parameter(f, varchar_type);
+        duckdb_scalar_function_set_return_type(f, ubigint_type);
+        duckdb_scalar_function_set_function(f, bf_cc_signature_func);
+        duckdb_register_scalar_function(connection, f);
+        duckdb_destroy_scalar_function(&f);
+    }
+
+    /* bf_cc_feature_name(bit INTEGER) -> VARCHAR */
+    {
+        duckdb_logical_type int_type = duckdb_create_logical_type(DUCKDB_TYPE_INTEGER);
+        duckdb_scalar_function f = duckdb_create_scalar_function();
+        duckdb_scalar_function_set_name(f, "bf_cc_feature_name");
+        duckdb_scalar_function_add_parameter(f, int_type);
+        duckdb_scalar_function_set_return_type(f, varchar_type);
+        duckdb_scalar_function_set_function(f, bf_cc_feature_name_func);
+        duckdb_register_scalar_function(connection, f);
+        duckdb_destroy_scalar_function(&f);
+        duckdb_destroy_logical_type(&int_type);
+    }
+
+    /* bf_cc_feature_bit(name VARCHAR) -> INTEGER */
+    {
+        duckdb_logical_type int_type = duckdb_create_logical_type(DUCKDB_TYPE_INTEGER);
+        duckdb_scalar_function f = duckdb_create_scalar_function();
+        duckdb_scalar_function_set_name(f, "bf_cc_feature_bit");
+        duckdb_scalar_function_add_parameter(f, varchar_type);
+        duckdb_scalar_function_set_return_type(f, int_type);
+        duckdb_scalar_function_set_function(f, bf_cc_feature_bit_func);
+        duckdb_register_scalar_function(connection, f);
+        duckdb_destroy_scalar_function(&f);
+        duckdb_destroy_logical_type(&int_type);
+    }
+
+    /* bf_cc_features_json() -> VARCHAR  (no args) */
+    {
+        duckdb_scalar_function f = duckdb_create_scalar_function();
+        duckdb_scalar_function_set_name(f, "bf_cc_features_json");
+        duckdb_scalar_function_set_return_type(f, varchar_type);
+        duckdb_scalar_function_set_function(f, bf_cc_features_json_func);
         duckdb_register_scalar_function(connection, f);
         duckdb_destroy_scalar_function(&f);
     }

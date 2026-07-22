@@ -189,6 +189,23 @@ NB_MODULE(_core, m) {
         rfp_sha256_hex(data.c_str(), data.size(), hex, sizeof(hex));
         return std::string(hex, 64);
     }, "SHA-256 hex of bytes (matches hashlib/shasum)");
+    m.def("cc_signature", [](const std::string &s) {
+        return rfp_cc_signature(s.data(), s.size());
+    }, "Char-class structural feature bitmask (uint64) for a symbol");
+    m.def("cc_feature_name", [](int bit) -> nb::object {
+        const char *n = rfp_cc_feature_name(bit);
+        return n ? nb::cast(std::string(n)) : nb::none();
+    }, "Feature name for a bit index (None if unused)");
+    m.def("cc_feature_bit", [](const std::string &name) -> nb::object {
+        int b = rfp_cc_feature_bit(name.c_str());
+        return b < 0 ? nb::none() : nb::cast(b);
+    }, "Bit index for a feature name (None if unknown — a divergence flag)");
+    m.def("cc_features_json", []() {
+        char *js = rfp_cc_features_json();
+        std::string s = js ? js : "";
+        if (js) rfp_free_string(js);
+        return s;
+    }, "The feature registry as JSON, for interning");
     m.def("from_blob", &from_blob, "Deserialize a bitmap from bytes");
     m.def("from_base64", &from_base64, "Deserialize a bitmap from base64 string");
     m.def("from_json", &from_json, "Build a bitmap from a JSON array of strings");
