@@ -290,6 +290,22 @@ rfp_bitmap *rfp_deserialize(const char *buf, size_t len) {
     return bm;
 }
 
+/* Zero-copy read-only view over the portable buffer. The frozen reader is
+ * unchecked, so first validate that a complete bitmap fits within `len`. */
+rfp_bitmap *rfp_deserialize_frozen(const char *buf, size_t len) {
+    if (!buf || len == 0) return nullptr;
+    if (roaring_bitmap_portable_deserialize_size(buf, len) == 0) return nullptr;
+    roaring_bitmap_t *r = roaring_bitmap_portable_deserialize_frozen(buf);
+    if (!r) return nullptr;
+    auto *bm = new (std::nothrow) rfp_bitmap;
+    if (!bm) {
+        roaring_bitmap_free(r);
+        return nullptr;
+    }
+    bm->roaring = r;
+    return bm;
+}
+
 /* ========================================================================
  * Base64 serialization
  * ======================================================================== */

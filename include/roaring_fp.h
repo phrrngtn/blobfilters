@@ -55,6 +55,13 @@ size_t rfp_serialized_size(const rfp_bitmap *bm);
 size_t rfp_serialize(const rfp_bitmap *bm, char *buf, size_t buf_len);
 rfp_bitmap *rfp_deserialize(const char *buf, size_t len);
 
+/* Zero-copy VIEW over a portable-serialized buffer (no container copy; a single
+ * skeleton allocation). READ-ONLY: never pass to rfp_or_inplace or any mutator.
+ * The buffer must remain valid and unmodified for the returned bitmap's lifetime.
+ * Free with rfp_free (frozen-aware). Returns NULL on invalid/truncated input.
+ * Works on unaligned buffers. Much cheaper than rfp_deserialize for large sketches. */
+rfp_bitmap *rfp_deserialize_frozen(const char *buf, size_t len);
+
 /* Base64 serialization (for embedding in JSON documents) */
 size_t rfp_base64_size(const rfp_bitmap *bm);
 size_t rfp_to_base64(const rfp_bitmap *bm, char *buf, size_t buf_len);

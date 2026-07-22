@@ -93,7 +93,9 @@ static rfp_bitmap *get_ref_cached(RefCache *cache,
     if (cache->ref_bm) rfp_free(cache->ref_bm);
     cache->ref_ptr = blob;
     cache->ref_len = len;
-    cache->ref_bm  = rfp_deserialize(blob, len);
+    /* zero-copy view: the DuckDB input vector data is stable for the whole chunk,
+       and the cached view lives only for this chunk (freed after the row loop). */
+    cache->ref_bm  = rfp_deserialize_frozen(blob, len);
     return cache->ref_bm;
 }
 
@@ -245,7 +247,7 @@ static void bf_cardinality_func(duckdb_function_info info,
         uint32_t len;
         const char *blob = str_ptr(&data0[row], &len);
 
-        rfp_bitmap *bm = rfp_deserialize(blob, len);
+        rfp_bitmap *bm = rfp_deserialize_frozen(blob, len);
         if (!bm) {
             result_data[row] = 0;
             continue;
@@ -276,7 +278,7 @@ static void bf_intersection_card_func(duckdb_function_info info,
         const char *blob_a = str_ptr(&data0[row], &len_a);
         const char *blob_b = str_ptr(&data1[row], &len_b);
 
-        rfp_bitmap *a = rfp_deserialize(blob_a, len_a);
+        rfp_bitmap *a = rfp_deserialize_frozen(blob_a, len_a);
         rfp_bitmap *b = get_ref_cached(&cache, blob_b, len_b);
         if (!a || !b) {
             rfp_free(a);
@@ -310,7 +312,7 @@ static void bf_containment_func(duckdb_function_info info,
         const char *blob_a = str_ptr(&data0[row], &len_a);
         const char *blob_b = str_ptr(&data1[row], &len_b);
 
-        rfp_bitmap *probe = rfp_deserialize(blob_a, len_a);
+        rfp_bitmap *probe = rfp_deserialize_frozen(blob_a, len_a);
         rfp_bitmap *ref = get_ref_cached(&cache, blob_b, len_b);
         if (!probe || !ref) {
             rfp_free(probe);
@@ -344,7 +346,7 @@ static void bf_jaccard_func(duckdb_function_info info,
         const char *blob_a = str_ptr(&data0[row], &len_a);
         const char *blob_b = str_ptr(&data1[row], &len_b);
 
-        rfp_bitmap *a = rfp_deserialize(blob_a, len_a);
+        rfp_bitmap *a = rfp_deserialize_frozen(blob_a, len_a);
         rfp_bitmap *b = get_ref_cached(&cache, blob_b, len_b);
         if (!a || !b) {
             rfp_free(a);
@@ -381,7 +383,7 @@ static void bf_binop_blob(duckdb_data_chunk input, duckdb_vector output,
         const char *blob_a = str_ptr(&data0[row], &len_a);
         const char *blob_b = str_ptr(&data1[row], &len_b);
 
-        rfp_bitmap *a = rfp_deserialize(blob_a, len_a);
+        rfp_bitmap *a = rfp_deserialize_frozen(blob_a, len_a);
         rfp_bitmap *b = get_ref_cached(&cache, blob_b, len_b);
         if (!a || !b) {
             rfp_free(a);  /* b is cache-owned, freed once after the loop */

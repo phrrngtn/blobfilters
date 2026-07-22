@@ -828,10 +828,11 @@ static void sqlite_roaring_binop(sqlite3_context *ctx, int argc, sqlite3_value *
         return;
     }
 
-    /* operand a — fresh, always owned by us */
+    /* operand a — fresh, owned by us, used only within this call: a zero-copy
+       view is safe (sqlite's blob pointer is valid for the call duration). */
     const char *data_a = static_cast<const char *>(sqlite3_value_blob(argv[0]));
     int len_a = sqlite3_value_bytes(argv[0]);
-    rfp_bitmap *a = rfp_deserialize(data_a, static_cast<size_t>(len_a));
+    rfp_bitmap *a = rfp_deserialize_frozen(data_a, static_cast<size_t>(len_a));
 
     /* operand b — cache only when it is a genuine BLOB */
     rfp_bitmap *b = nullptr;
