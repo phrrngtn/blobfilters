@@ -67,6 +67,17 @@ size_t rfp_base64_size(const rfp_bitmap *bm);
 size_t rfp_to_base64(const rfp_bitmap *bm, char *buf, size_t buf_len);
 rfp_bitmap *rfp_from_base64(const char *b64, size_t len);
 
+/* ── Content checksums (pure C SHA-256; deterministic across native & WASM) ──
+ * Standard FIPS 180-4 SHA-256 — bf_sha256(bytes) equals hashlib/shasum, so it
+ * interoperates with the browser (SubtleCrypto) and any other tool. */
+void rfp_sha256(const void *data, size_t len, unsigned char out[32]);
+/* Lowercase hex of SHA-256 (writes 64 chars + NUL; out_cap must be >= 65). */
+void rfp_sha256_hex(const void *data, size_t len, char *out, size_t out_cap);
+/* CANONICAL checksum: SHA-256 hex of the bitmap's portable serialization.
+ * Order-independent by construction (the bitmap is a set); with canonicalized
+ * inputs this is the stable "same content, any order/format" key. out_cap >= 65. */
+void rfp_bitmap_checksum_hex(const rfp_bitmap *bm, char *out, size_t out_cap);
+
 /* Set operations */
 void rfp_or_inplace(rfp_bitmap *dst, const rfp_bitmap *src);
 

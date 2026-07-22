@@ -91,6 +91,37 @@ static void sqlite_roaring_build_final(sqlite3_context *ctx) {
     sqlite3_result_blob(ctx, buf, static_cast<int>(size), sqlite3_free);
 }
 
+/* bf_sha256(blob) -> TEXT : SHA-256 hex of the raw bytes (matches hashlib). */
+static void sqlite_roaring_sha256(sqlite3_context *ctx, int argc, sqlite3_value **argv) {
+    if (argc != 1 || sqlite3_value_type(argv[0]) == SQLITE_NULL) {
+        sqlite3_result_null(ctx);
+        return;
+    }
+    const void *data = sqlite3_value_blob(argv[0]);
+    int len = sqlite3_value_bytes(argv[0]);
+    char hex[65];
+    rfp_sha256_hex(data, static_cast<size_t>(len), hex, sizeof(hex));
+    sqlite3_result_text(ctx, hex, 64, SQLITE_TRANSIENT);
+}
+
+/* bf_checksum(value) -> TEXT  [aggregate] : canonical set-checksum. Reuses the
+   bf_build step; the final SHA-256s the bitmap's serialization instead of
+   returning the blob. Equivalent to bf_sha256(bf_build(value)). */
+static void sqlite_roaring_checksum_final(sqlite3_context *ctx) {
+    auto *agg = static_cast<RoaringAggCtx *>(sqlite3_aggregate_context(ctx, 0));
+    char hex[65];
+    if (!agg || !agg->bitmap) {
+        rfp_bitmap *empty = rfp_create();
+        rfp_bitmap_checksum_hex(empty, hex, sizeof(hex));
+        rfp_free(empty);
+    } else {
+        rfp_bitmap_checksum_hex(agg->bitmap, hex, sizeof(hex));
+        rfp_free(agg->bitmap);
+        agg->bitmap = nullptr;
+    }
+    sqlite3_result_text(ctx, hex, 64, SQLITE_TRANSIENT);
+}
+
 /* ========================================================================
  *   bf_build_json(json_array TEXT) -> BLOB
  * ======================================================================== */
@@ -890,6 +921,10 @@ int sqlite3_blobfilters_init(sqlite3 *db, char **pzErrMsg, const sqlite3_api_rou
     /* Aggregate: bf_build(value) -> BLOB */
     sqlite3_create_function(db, "bf_build", 1, SQLITE_UTF8 | SQLITE_DETERMINISTIC,
                             nullptr, nullptr, sqlite_roaring_build_step, sqlite_roaring_build_final);
+    sqlite3_create_function(db, "bf_sha256", 1, SQLITE_UTF8 | SQLITE_DETERMINISTIC,
+                            nullptr, sqlite_roaring_sha256, nullptr, nullptr);
+    sqlite3_create_function(db, "bf_checksum", 1, SQLITE_UTF8 | SQLITE_DETERMINISTIC,
+                            nullptr, nullptr, sqlite_roaring_build_step, sqlite_roaring_checksum_final);
 
     sqlite3_create_function(db, "bf_build_json", 1, SQLITE_UTF8 | SQLITE_DETERMINISTIC,
                             nullptr, sqlite_roaring_build_json, nullptr, nullptr);

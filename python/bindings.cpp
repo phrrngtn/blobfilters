@@ -77,6 +77,13 @@ public:
         return buf;
     }
 
+    /* Canonical checksum: SHA-256 hex of the (order-independent) serialization. */
+    std::string checksum() const {
+        char hex[65];
+        rfp_bitmap_checksum_hex(bm_, hex, sizeof(hex));
+        return std::string(hex, 64);
+    }
+
     uint64_t intersection_card(const RoaringFP &other) const {
         return rfp_intersection_card(bm_, other.bm_);
     }
@@ -161,6 +168,7 @@ NB_MODULE(_core, m) {
         .def("cardinality", &RoaringFP::cardinality, "Number of elements")
         .def("serialize", &RoaringFP::serialize, "Serialize to bytes (portable format)")
         .def("to_base64", &RoaringFP::to_base64, "Serialize to base64 string")
+        .def("checksum", &RoaringFP::checksum, "Canonical checksum: SHA-256 hex of the serialization")
         .def("intersection_card", &RoaringFP::intersection_card, "Intersection cardinality with another bitmap")
         .def("containment", &RoaringFP::containment, "Containment score: |self & other| / |self|")
         .def("jaccard", &RoaringFP::jaccard, "Jaccard similarity with another bitmap")
@@ -176,6 +184,11 @@ NB_MODULE(_core, m) {
     m.attr("NORM_NONE") = static_cast<int>(RFP_NORM_NONE);
     m.attr("NORM_CASEFOLD") = static_cast<int>(RFP_NORM_CASEFOLD);
 
+    m.def("sha256", [](nb::bytes data) {
+        char hex[65];
+        rfp_sha256_hex(data.c_str(), data.size(), hex, sizeof(hex));
+        return std::string(hex, 64);
+    }, "SHA-256 hex of bytes (matches hashlib/shasum)");
     m.def("from_blob", &from_blob, "Deserialize a bitmap from bytes");
     m.def("from_base64", &from_base64, "Deserialize a bitmap from base64 string");
     m.def("from_json", &from_json, "Build a bitmap from a JSON array of strings");

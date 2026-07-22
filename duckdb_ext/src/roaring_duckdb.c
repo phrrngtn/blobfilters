@@ -168,6 +168,45 @@ static void bf_build_finalize(duckdb_function_info info, duckdb_aggregate_state 
     }
 }
 
+/* ── bf_sha256(blob BLOB) -> VARCHAR ─────────────────────────────────
+   SHA-256 hex of the raw bytes (matches hashlib/shasum/SubtleCrypto).
+   Composes with bf_build for the canonical checksum: bf_sha256(bf_build(x)). */
+static void bf_sha256_func(duckdb_function_info info,
+                           duckdb_data_chunk input,
+                           duckdb_vector output) {
+    idx_t size = duckdb_data_chunk_get_size(input);
+    duckdb_vector vec0 = duckdb_data_chunk_get_vector(input, 0);
+    duckdb_string_t *data0 = (duckdb_string_t *)duckdb_vector_get_data(vec0);
+    uint64_t *val0 = duckdb_vector_get_validity(vec0);
+    for (idx_t row = 0; row < size; row++) {
+        CHECK_NULL_1(row);
+        uint32_t len;
+        const char *blob = str_ptr(&data0[row], &len);
+        char hex[65];
+        rfp_sha256_hex(blob, len, hex, sizeof(hex));
+        duckdb_vector_assign_string_element_len(output, row, hex, 64);
+    }
+}
+
+/* ── bf_checksum(value VARCHAR) -> VARCHAR  [aggregate] ───────────────
+   Canonical set-checksum in one call: build a roaring bitmap (order-
+   independent) from the group's values, then SHA-256 its serialization.
+   Equivalent to bf_sha256(bf_build(value)); reuses the bf_build state. */
+static void bf_checksum_finalize(duckdb_function_info info, duckdb_aggregate_state *source,
+                                 duckdb_vector result, idx_t count, idx_t offset) {
+    (void)info;
+    for (idx_t i = 0; i < count; i++) {
+        BfBuildState *s = (BfBuildState *)source[i];
+        rfp_bitmap *bm = s->bm;
+        int temp = 0;
+        if (!bm) { bm = rfp_create(); temp = 1; }
+        char hex[65];
+        rfp_bitmap_checksum_hex(bm, hex, sizeof(hex));
+        duckdb_vector_assign_string_element_len(result, offset + i, hex, 64);
+        if (temp) rfp_free(bm);
+    }
+}
+
 static void bf_build_destroy(duckdb_aggregate_state *states, idx_t count) {
     for (idx_t i = 0; i < count; i++) {
         BfBuildState *s = (BfBuildState *)states[i];
@@ -985,6 +1024,31 @@ static void register_functions(duckdb_connection connection) {
         duckdb_aggregate_function_set_functions(f, bf_build_state_size,
                                                 bf_build_init, bf_build_update,
                                                 bf_build_combine, bf_build_finalize);
+        duckdb_aggregate_function_set_destructor(f, bf_build_destroy);
+        duckdb_register_aggregate_function(connection, f);
+        duckdb_destroy_aggregate_function(&f);
+    }
+
+    /* bf_sha256(blob BLOB) -> VARCHAR */
+    {
+        duckdb_scalar_function f = duckdb_create_scalar_function();
+        duckdb_scalar_function_set_name(f, "bf_sha256");
+        duckdb_scalar_function_add_parameter(f, blob_type);
+        duckdb_scalar_function_set_return_type(f, varchar_type);
+        duckdb_scalar_function_set_function(f, bf_sha256_func);
+        duckdb_register_scalar_function(connection, f);
+        duckdb_destroy_scalar_function(&f);
+    }
+
+    /* bf_checksum(value VARCHAR) -> VARCHAR   [aggregate] */
+    {
+        duckdb_aggregate_function f = duckdb_create_aggregate_function();
+        duckdb_aggregate_function_set_name(f, "bf_checksum");
+        duckdb_aggregate_function_add_parameter(f, varchar_type);
+        duckdb_aggregate_function_set_return_type(f, varchar_type);
+        duckdb_aggregate_function_set_functions(f, bf_build_state_size,
+                                                bf_build_init, bf_build_update,
+                                                bf_build_combine, bf_checksum_finalize);
         duckdb_aggregate_function_set_destructor(f, bf_build_destroy);
         duckdb_register_aggregate_function(connection, f);
         duckdb_destroy_aggregate_function(&f);
