@@ -565,6 +565,38 @@ int rfp_cc_eval(uint64_t sig, const char *expr) {
     return v;
 }
 
+/* -------- cc_profile: per-feature-bit popcount accumulator over a column -------- */
+void rfp_cc_profile_update(uint64_t *counts, uint64_t *n, const void *data, size_t len) {
+    uint64_t sig = rfp_cc_signature(data, len);
+    (*n)++;
+    while (sig) { int b = __builtin_ctzll(sig); counts[b]++; sig &= sig - 1; }
+}
+
+void rfp_cc_profile_merge(uint64_t *dst, uint64_t *dn, const uint64_t *src, uint64_t sn) {
+    for (int b = 0; b < 64; b++) dst[b] += src[b];
+    *dn += sn;
+}
+
+char *rfp_cc_profile_json(const uint64_t *counts, uint64_t n) {
+    std::string s = "{\"n\":" + std::to_string(n) + ",\"features\":[";
+    bool first = true;
+    for (int b = 0; b < 64; b++) {
+        if (!counts[b]) continue;
+        const char *name = rfp_cc_feature_name(b);
+        if (!name) continue;
+        char pbuf[32];
+        std::snprintf(pbuf, sizeof(pbuf), "%.2f", n ? 100.0 * (double)counts[b] / (double)n : 0.0);
+        if (!first) s += ",";
+        first = false;
+        s += "{\"bit\":" + std::to_string(b) + ",\"name\":\"" + name +
+             "\",\"count\":" + std::to_string(counts[b]) + ",\"pct\":" + pbuf + "}";
+    }
+    s += "]}";
+    char *out = (char *)std::malloc(s.size() + 1);
+    if (out) std::memcpy(out, s.c_str(), s.size() + 1);
+    return out;
+}
+
 /* The feature vocabulary is the FK target for user-land domain->feature tables;
    bump this (append-only!) whenever bits are added, never renumber/rename. */
 #define CC_VOCAB_VERSION 1

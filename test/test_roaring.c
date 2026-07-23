@@ -539,6 +539,27 @@ int main(void) {
         CHECK(rfp_cc_eval(st, "") == -1, "empty expr -> -1");
     }
 
+    printf("\n=== Test 24: cc_profile popcount accumulator ===\n");
+    {
+        uint64_t counts[64] = {0}; uint64_t n = 0;
+        rfp_cc_profile_update(counts, &n, "42", 2);
+        rfp_cc_profile_update(counts, &n, "CA", 2);
+        rfp_cc_profile_update(counts, &n, "99", 2);
+        CHECK(n == 3, "cc_profile counted 3 values");
+        CHECK(counts[rfp_cc_feature_bit("all_digits")] == 2, "all_digits count = 2 (42, 99)");
+        CHECK(counts[rfp_cc_feature_bit("all_upper")] == 1, "all_upper count = 1 (CA)");
+        CHECK(counts[rfp_cc_feature_bit("len_2")] == 3, "len_2 count = 3 (all)");
+        char *js = rfp_cc_profile_json(counts, n);
+        CHECK(js && strstr(js, "\"n\":3") != NULL, "json reports n=3");
+        CHECK(js && strstr(js, "all_digits") != NULL, "json lists all_digits");
+        rfp_free_string(js);
+        /* merge is elementwise-additive (mergeable => parallel-safe) */
+        uint64_t c2[64] = {0}; uint64_t n2 = 0;
+        rfp_cc_profile_update(c2, &n2, "7", 1);
+        rfp_cc_profile_merge(counts, &n, c2, n2);
+        CHECK(n == 4 && counts[rfp_cc_feature_bit("all_digits")] == 3, "after merge: n=4, all_digits=3");
+    }
+
     printf("\n=== Results: %d/%d tests passed ===\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;
 }

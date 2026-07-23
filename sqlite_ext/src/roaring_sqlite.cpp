@@ -153,6 +153,24 @@ static void sqlite_cc_eval(sqlite3_context *ctx, int argc, sqlite3_value **argv)
     if (v < 0) sqlite3_result_null(ctx); else sqlite3_result_int(ctx, v);
 }
 
+/* bf_cc_profile(value) -> JSON  [aggregate]: one-scan per-feature-bit popcount fingerprint. */
+struct CcProfileAggCtx { uint64_t counts[64]; uint64_t n; };
+static void sqlite_cc_profile_step(sqlite3_context *ctx, int argc, sqlite3_value **argv) {
+    if (argc != 1 || sqlite3_value_type(argv[0]) == SQLITE_NULL) return;
+    auto *agg = static_cast<CcProfileAggCtx *>(sqlite3_aggregate_context(ctx, sizeof(CcProfileAggCtx)));
+    if (!agg) return;  /* SQLite zero-inits the context on first alloc */
+    const void *data = sqlite3_value_blob(argv[0]);
+    int len = sqlite3_value_bytes(argv[0]);
+    rfp_cc_profile_update(agg->counts, &agg->n, data, static_cast<size_t>(len));
+}
+static void sqlite_cc_profile_final(sqlite3_context *ctx) {
+    auto *agg = static_cast<CcProfileAggCtx *>(sqlite3_aggregate_context(ctx, 0));
+    uint64_t zero[64] = {0};
+    char *js = agg ? rfp_cc_profile_json(agg->counts, agg->n) : rfp_cc_profile_json(zero, 0);
+    if (js) { sqlite3_result_text(ctx, js, -1, SQLITE_TRANSIENT); rfp_free_string(js); }
+    else sqlite3_result_null(ctx);
+}
+
 /* ========================================================================
  *   bf_build_json(json_array TEXT) -> BLOB
  * ======================================================================== */
@@ -966,6 +984,8 @@ int sqlite3_blobfilters_init(sqlite3 *db, char **pzErrMsg, const sqlite3_api_rou
                             nullptr, sqlite_cc_features_json, nullptr, nullptr);
     sqlite3_create_function(db, "bf_cc_eval", 2, SQLITE_UTF8 | SQLITE_DETERMINISTIC,
                             nullptr, sqlite_cc_eval, nullptr, nullptr);
+    sqlite3_create_function(db, "bf_cc_profile", 1, SQLITE_UTF8 | SQLITE_DETERMINISTIC,
+                            nullptr, nullptr, sqlite_cc_profile_step, sqlite_cc_profile_final);
 
     sqlite3_create_function(db, "bf_build_json", 1, SQLITE_UTF8 | SQLITE_DETERMINISTIC,
                             nullptr, sqlite_roaring_build_json, nullptr, nullptr);

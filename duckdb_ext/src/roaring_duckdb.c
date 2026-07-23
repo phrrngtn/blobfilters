@@ -214,6 +214,54 @@ static void bf_build_destroy(duckdb_aggregate_state *states, idx_t count) {
     }
 }
 
+/* ── bf_cc_profile(value VARCHAR) -> VARCHAR   [aggregate] ───────────
+   One-scan char-class fingerprint of a column: per-feature-bit popcount + total,
+   emitted as JSON. State is a flat 64-counter struct (no heap => no destructor),
+   mergeable so it parallelizes. Whole-table one-pass fingerprint:
+   SELECT json_object('c1', bf_cc_profile(c1), 'c2', bf_cc_profile(c2), ...) FROM t; */
+typedef struct { uint64_t counts[64]; uint64_t n; } CcProfileState;
+
+static idx_t cc_profile_state_size(duckdb_function_info info) {
+    (void)info; return sizeof(CcProfileState);
+}
+static void cc_profile_init(duckdb_function_info info, duckdb_aggregate_state state) {
+    (void)info; memset((void *)state, 0, sizeof(CcProfileState));
+}
+static void cc_profile_update(duckdb_function_info info, duckdb_data_chunk input,
+                              duckdb_aggregate_state *states) {
+    (void)info;
+    idx_t size = duckdb_data_chunk_get_size(input);
+    duckdb_vector vec0 = duckdb_data_chunk_get_vector(input, 0);
+    duckdb_string_t *data0 = (duckdb_string_t *)duckdb_vector_get_data(vec0);
+    uint64_t *val0 = duckdb_vector_get_validity(vec0);
+    for (idx_t row = 0; row < size; row++) {
+        if (val0 && !duckdb_validity_row_is_valid(val0, row)) continue;
+        CcProfileState *s = (CcProfileState *)states[row];
+        uint32_t len;
+        const char *str = str_ptr(&data0[row], &len);
+        rfp_cc_profile_update(s->counts, &s->n, str, len);
+    }
+}
+static void cc_profile_combine(duckdb_function_info info, duckdb_aggregate_state *source,
+                               duckdb_aggregate_state *target, idx_t count) {
+    (void)info;
+    for (idx_t i = 0; i < count; i++) {
+        CcProfileState *src = (CcProfileState *)source[i];
+        CcProfileState *dst = (CcProfileState *)target[i];
+        rfp_cc_profile_merge(dst->counts, &dst->n, src->counts, src->n);
+    }
+}
+static void cc_profile_finalize(duckdb_function_info info, duckdb_aggregate_state *source,
+                                duckdb_vector result, idx_t count, idx_t offset) {
+    (void)info;
+    for (idx_t i = 0; i < count; i++) {
+        CcProfileState *s = (CcProfileState *)source[i];
+        char *js = rfp_cc_profile_json(s->counts, s->n);
+        duckdb_vector_assign_string_element_len(result, offset + i, js ? js : "{}", js ? strlen(js) : 2);
+        if (js) rfp_free_string(js);
+    }
+}
+
 /* ── bf_build_json(json_array VARCHAR) -> BLOB ───────────────────── */
 
 static void bf_build_json_func(duckdb_function_info info,
@@ -1195,6 +1243,19 @@ static void register_functions(duckdb_connection connection) {
                                                 bf_build_init, bf_build_update,
                                                 bf_build_combine, bf_build_finalize);
         duckdb_aggregate_function_set_destructor(f, bf_build_destroy);
+        duckdb_register_aggregate_function(connection, f);
+        duckdb_destroy_aggregate_function(&f);
+    }
+
+    /* bf_cc_profile(value VARCHAR) -> VARCHAR  [aggregate] */
+    {
+        duckdb_aggregate_function f = duckdb_create_aggregate_function();
+        duckdb_aggregate_function_set_name(f, "bf_cc_profile");
+        duckdb_aggregate_function_add_parameter(f, varchar_type);
+        duckdb_aggregate_function_set_return_type(f, varchar_type);
+        duckdb_aggregate_function_set_functions(f, cc_profile_state_size,
+                                                cc_profile_init, cc_profile_update,
+                                                cc_profile_combine, cc_profile_finalize);
         duckdb_register_aggregate_function(connection, f);
         duckdb_destroy_aggregate_function(&f);
     }

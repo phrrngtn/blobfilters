@@ -54,6 +54,14 @@ char *rfp_cc_features_json(void);
  * user-land expands composite->composite DAGs to primitive-name exprs first. */
 int rfp_cc_eval(uint64_t sig, const char *expr);
 
+/* cc_profile aggregate helpers: accumulate per-feature-bit popcounts over a column of
+ * values (host-managed state = uint64 counts[64] + total n; no heap, mergeable).
+ * update: add one value's set bits; merge: elementwise add; json: emit
+ * {"n":N,"features":[{bit,name,count,pct}]} for bits with count>0 (free w/ rfp_free_string). */
+void rfp_cc_profile_update(uint64_t *counts, uint64_t *n, const void *data, size_t len);
+void rfp_cc_profile_merge(uint64_t *dst, uint64_t *dn, const uint64_t *src, uint64_t sn);
+char *rfp_cc_profile_json(const uint64_t *counts, uint64_t n);
+
 /* Add values */
 void rfp_add_uint32(rfp_bitmap *bm, uint32_t val);
 void rfp_add_hash(rfp_bitmap *bm, const void *data, size_t len);  /* FNV-1a -> add */
